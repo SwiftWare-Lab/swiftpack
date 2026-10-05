@@ -409,9 +409,10 @@ if __name__ == "__main__":
 
     # Table Header Formatting
     header = f"| {'Baseline Implementation':<33} | {'GFLOP/s':<10} | {'Abs Speedup':<12} | {'Rel Speedup':<12} | {'Correct':<8} |"
-    divider = "-" * len(header)
+    #divider = "-" * len(header)
+    divider = "| :---" * (len(header.split("|"))-2) + " |"
 
-    print(divider)
+    #print(divider)
     print(header)
     print(divider)
 
@@ -425,7 +426,7 @@ if __name__ == "__main__":
         print(f"| {name:<33} | {gflops:10.3f} | {abs_speedup:12.2f}x | {rel_speedup:12.2f}x | {status:<8} |")
         prev_elapsed = elapsed
 
-    print(divider)
+    #print(divider)
 
     # Plotting Output
     names = [row[0] for row in benchmark_data]

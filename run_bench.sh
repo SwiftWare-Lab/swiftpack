@@ -2,9 +2,9 @@
 
 ##################### SLURM (do not change) v  #####################
 #SBATCH --export=ALL
-#SBATCH --job-name="lab02"
+#SBATCH --job-name="swiftpack-bench"
 #SBATCH --nodes=1
-#SBATCH --output="lab02.%j.%N.out"
+#SBATCH --output="swiftpack-bench.%j.%N.out"
 #SBATCH -t 00:45:00
 ##################### SLURM (do not change) ^  #####################
 

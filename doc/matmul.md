@@ -196,6 +196,32 @@ and can be summarized as:
 5. parallel outer loops with `prange`, and
 6. cache-aware tiling to reduce memory traffic.
 
+The table summary is (copied from benchmark output):
+
+| Baseline Implementation           | GFLOP/s    | Abs Speedup  | Rel Speedup  | Correct  |
+| :--- | :--- | :--- | :--- | :--- |
+| 0_python_naive                    |      0.014 |         1.00x |         1.00x | PASS     |
+| 1_numba_naive                     |      2.466 |         2.79x |         2.79x | PASS     |
+| 2_order_ijk                       |      2.466 |         2.79x |         1.00x | PASS     |
+| 2_order_ikj                       |     20.538 |        23.21x |         8.33x | PASS     |
+| 2_order_jik                       |      2.376 |         2.69x |         0.12x | PASS     |
+| 2_order_jki                       |      0.590 |         0.67x |         0.25x | PASS     |
+| 2_order_kij                       |     19.316 |        21.83x |        32.74x | PASS     |
+| 2_order_kji                       |      0.597 |         0.67x |         0.03x | PASS     |
+| 3_fastmath_ikj                    |     20.538 |        23.21x |        34.42x | PASS     |
+| 4_parallel_i                      |     20.546 |        23.22x |         1.00x | PASS     |
+| 4_parallel_k                      |     19.024 |        21.50x |         0.93x | PASS     |
+| 4_parallel_j                      |      2.581 |         2.92x |         0.14x | PASS     |
+| 5_blocked_parallel_i              |      6.945 |         7.85x |         2.69x | PASS     |
+| 6_blocked_np_dot                  |     28.775 |        32.52x |         4.14x | PASS     |
+| 7_blocked_temp_copy               |     30.491 |        34.46x |         1.06x | PASS     |
+| 8_two_level_blocked_temp_np_dot   |     31.485 |        35.59x |         1.03x | PASS     |
+| 9_blocked_zero_alloc              |     32.819 |        37.09x |         1.04x | PASS     |
+| 10_np_dot                         |     67.542 |        76.34x |         2.06x | PASS     |
+
+Note. numbers are obtained from Intel(R) Core(TM) Ultra 7 265 with 
+20 cores and 40 threads, 30MB cache with avx2. 
+
 This progression is the core optimization story behind matrix
 multiplication in Numba and is exactly the pattern
 that `swiftpack` tries to automate.
