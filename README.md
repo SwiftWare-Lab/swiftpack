@@ -91,6 +91,7 @@ C = np.zeros((N, N), dtype=np.float64)
 matmul(A, B, C)
 ```
 
+
 ## Task list
 
 - [ ] The current GEMM is ~2 times slower than `np.dot`

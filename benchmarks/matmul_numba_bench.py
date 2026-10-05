@@ -387,12 +387,19 @@ def run_benchmark(matrix_size=512):
 # ---------------------------------------------------------
 if __name__ == "__main__":
     # Get user input for matrix dimension N
+    N_input = 512
     if len(sys.argv) > 1:
         try:
             N_input = int(sys.argv[1])
         except ValueError:
             N_input = 512
+    if len(sys.argv) > 2:
+        try:
+            img_path = sys.argv[2]
+        except ValueError:
+            img_path = f"matmul_benchmark_N{N_input}.png"
     else:
+        img_path = f"matmul_benchmark_N{N_input}.png"
         N_input = 512
 
     print(f"\nRunning Matrix Multiplication Benchmarks for Matrix Size {N_input}x{N_input}...\n")
@@ -402,9 +409,10 @@ if __name__ == "__main__":
 
     # Table Header Formatting
     header = f"| {'Baseline Implementation':<33} | {'GFLOP/s':<10} | {'Abs Speedup':<12} | {'Rel Speedup':<12} | {'Correct':<8} |"
-    divider = "-" * len(header)
+    #divider = "-" * len(header)
+    divider = "| :---" * (len(header.split("|"))-2) + " |"
 
-    print(divider)
+    #print(divider)
     print(header)
     print(divider)
 
@@ -418,7 +426,7 @@ if __name__ == "__main__":
         print(f"| {name:<33} | {gflops:10.3f} | {abs_speedup:12.2f}x | {rel_speedup:12.2f}x | {status:<8} |")
         prev_elapsed = elapsed
 
-    print(divider)
+    #print(divider)
 
     # Plotting Output
     names = [row[0] for row in benchmark_data]
@@ -444,4 +452,5 @@ if __name__ == "__main__":
     plt.yscale("log")
     plt.grid(True, which="both", ls="--", alpha=0.5)
     plt.tight_layout()
-    plt.show()
+    # save the plot as a PNG file
+    plt.savefig(img_path, dpi=300)
