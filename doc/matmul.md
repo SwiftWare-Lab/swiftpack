@@ -8,7 +8,7 @@ using the `swiftpack` decorator.
 
 ## Code optimization
 
-The optimization story behind `benchmarks/matmul_numba_bench.py` is a
+The optimization story behind `../benchmarks/matmul_numba_bench.py` is a
 classic GEMM workflow: start with a
 slow reference kernel, then progressively improve locality, backend
 compilation, and parallelism until the
