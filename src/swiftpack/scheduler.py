@@ -2,8 +2,9 @@ import ast
 from typing import Any, Dict, List, Tuple, Type
 from swiftpack.transformation import Transformation
 from swiftpack.loop_exchange import LoopExchange
-from swiftpack.tiling import LoopTiling
-from swiftpack.parallelism import ParallelizeLoop
+from swiftpack.loop_tiling import LoopTiling
+from swiftpack.loop_parallelism import LoopParallelism
+from swiftpack.loop_unrolling import LoopUnrolling
 from swiftpack.lvn import LocalValueNumbering
 
 class Scheduler:
@@ -29,8 +30,10 @@ class AutoTileAndParallelizeScheduler(Scheduler):
             # 2. Reorder loops from IJK -> IKJ for cache locality
             (LoopExchange, {"target_loops": ("j", "k")}),
             # 3. Block/Tile nested iteration space
-            (LoopTiling, {"tile_size": 32}),
-            # 4. Parallelize outermost 'i' loop across CPU cores
-            (ParallelizeLoop, {"loop_var": "i"}),
+            (LoopTiling, {"target_loop": "i", "tile_size": 32}),
+            # 4. Unroll loop 'j' for better instruction-level parallelism
+            (LoopUnrolling, {"loop_var": "j", "factor": 32}),
+            # 5. Parallelize loop 'i' loop across CPU cores
+            (LoopParallelism, {"loop_var": "k"}),
         ]
 
