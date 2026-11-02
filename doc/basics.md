@@ -21,7 +21,8 @@ operator precedence, and parent-child execution scopes.
  (`+`, `*`), statements (`if`, `while`), or expressions (`BinaryOp`).
 * **Leaves:** Represent terminal operands, such as variable 
   names (`Name`) or literals (`Constant`).
-* **Usage:** Used by parsers, linters, semantic analyzers, static security checkers, and source-to-source compilers.
+* **Usage:** Used by parsers, linters, semantic analyzers, static 
+security checkers, and source-to-source compilers.
 
 ---
 
@@ -75,8 +76,8 @@ Loops represent the highest execution-density areas in programs. Optimizing loop
 
 * **Loop Invariant Code Motion (Hoisting):** Moves computations whose values do not change across iterations outside the loop header.
 * **Loop Unrolling:** Replicates the loop body to decrease loop overhead (branch checks, induction increment) and expose instruction-level parallelism (ILP).
-* **Loop Vectorization (Auto-SIMD):** Transforms sequential loop iterations into Single Instruction, Multiple Data (SIMD) vector instructions.
 * **Loop Tiling (Blocking):** Reorganizes loop access patterns to fit within CPU L1/L2 cache lines, minimizing cache misses.
+* **Loop Exchange (Permutation):** Reorders nested loops to improve data locality and vectorization opportunities.
 
 ---
 
@@ -86,7 +87,7 @@ Optimizes memory access patterns, layout, and allocation overheads.
 
 * **Structure-of-Arrays (SoA) vs. Array-of-Structures (AoS):** Reorganizes struct memory layouts to optimize spatial cache locality and improve vectorization.
 * **Scalar Replacement of Aggregates (SRA):** Replaces aggregate objects/tuples with independent scalar variables that can fit directly in CPU registers.
-* **Memory Pool / Arena Allocation:** Replaces frequent dynamic heap allocations (`malloc`/`free`) with contiguous pre-allocated memory pools.
+* **Sparsity Exploitation:** Detects and optimizes operations on sparse data structures (e.g., sparse matrices) to avoid unnecessary computations and memory accesses.
 
 ---
 

@@ -8,7 +8,7 @@ using the `swiftpack` decorator.
 
 ## Code optimization
 
-The optimization story behind `../benchmarks/matmul_numba_bench.py` is a
+The optimization story behind `../../benchmarks/matmul_numba_bench.py` is a
 classic GEMM workflow: start with a
 slow reference kernel, then progressively improve locality, backend
 compilation, and parallelism until the
@@ -186,7 +186,7 @@ closer to a high-performance BLAS-style GEMM and can be even faster when
 the tile size is chosen well.
 
 The overall progression is shown 
-in ![Figure 1](matmul_numba_bench_512.png) 
+in ![Figure 1](../matmul_numba_bench_512.png) 
 and can be summarized as:
 
 1. correct but slow Python triple loop,
