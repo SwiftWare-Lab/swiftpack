@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="light">
+    <head>
+        <meta charset="utf-8">
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        
+        
+        <link rel="canonical" href="https://swiftware-lab.github.io/switpack/benchmarks/matmul/">
+        <link rel="shortcut icon" href="../../img/favicon.ico">
+        <title>Matrix multiplication - SwiftPack Docs</title>
+        <link href="../../css/bootstrap.min.css" rel="stylesheet">
+        <link href="../../css/fontawesome.min.css" rel="stylesheet">
+        <link href="../../css/brands.min.css" rel="stylesheet">
+        <link href="../../css/solid.min.css" rel="stylesheet">
+        <link href="../../css/v4-font-face.min.css" rel="stylesheet">
+        <link href="../../css/base.css" rel="stylesheet">
+        <link id="hljs-light" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" >
+        <link id="hljs-dark" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github-dark.min.css" disabled>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+        <script>hljs.highlightAll();</script> 
+    </head>
+
+    <body>
+        <div class="navbar fixed-top navbar-expand-lg navbar-dark bg-primary">
+            <div class="container">
+                <a class="navbar-brand" href="../..">SwiftPack Docs</a>
+                <!-- Expander button -->
+                <button type="button" class="navbar-toggler" data-bs-toggle="collapse" data-bs-target="#navbar-collapse" aria-controls="navbar-collapse" aria-expanded="false" aria-label="Toggle navigation">
+                    <span class="navbar-toggler-icon"></span>
+                </button>
+
+                <!-- Expanded navigation -->
+                <div id="navbar-collapse" class="navbar-collapse collapse">
+                        <!-- Main navigation -->
+                        <ul class="nav navbar-nav">
+                            <li class="nav-item">
+                                <a href="../.." class="nav-link">Home</a>
+                            </li>
+                            <li class="nav-item dropdown">
+                                <a href="#" class="nav-link dropdown-toggle" role="button" data-bs-toggle="dropdown"  aria-expanded="false">Getting Started</a>
+                                <ul class="dropdown-menu">
+                                    
+<li>
+    <a href="../../getting-started/usage/" class="dropdown-item">Usage demo</a>
+</li>
+                                </ul>
+                            </li>
+                            <li class="nav-item dropdown">
+                                <a href="#" class="nav-link dropdown-toggle" role="button" data-bs-toggle="dropdown"  aria-expanded="false">Compiler Pipeline</a>
+                                <ul class="dropdown-menu">
+                                    
+<li>
+    <a href="../../compiler/overview/" class="dropdown-item">Overview</a>
+</li>
+                                    
+<li>
+    <a href="../../compiler/basics/" class="dropdown-item">Code Representation</a>
+</li>
+                                    
+<li>
+    <a href="../../compiler/local_analysis/" class="dropdown-item">Local Analysis</a>
+</li>
+                                    
+<li>
+    <a href="../../compiler/loop_transformations/" class="dropdown-item">Loop Transformations</a>
+</li>
+                                    
+<li>
+    <a href="../../compiler/extending/" class="dropdown-item">Extending the Compiler</a>
+</li>
+                                </ul>
+                            </li>
+                            <li class="nav-item dropdown">
+                                <a href="#" class="nav-link dropdown-toggle active" aria-current="page" role="button" data-bs-toggle="dropdown"  aria-expanded="false">Benchmark</a>
+                                <ul class="dropdown-menu">
+                                    
+<li>
+    <a href="./" class="dropdown-item active" aria-current="page">Matrix multiplication</a>
+</li>
+                                    
+<li>
+    <a href="../cholesky/" class="dropdown-item">Cholesky decomposition</a>
+</li>
+                                </ul>
+                            </li>
+                        </ul>
+
+                    <ul class="nav navbar-nav ms-md-auto">
+                        <li class="nav-item">
+                            <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#mkdocs_search_modal">
+                                <i class="fa fa-search"></i> Search
+                            </a>
+                        </li>
+                            <li class="nav-item">
+                                <a rel="prev" href="../../compiler/extending/" class="nav-link">
+                                    <i class="fa fa-arrow-left"></i> Previous
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a rel="next" href="../cholesky/" class="nav-link">
+                                    Next <i class="fa fa-arrow-right"></i>
+                                </a>
+                            </li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="container">
+            <div class="row">
+                    <div class="col-md-3"><div class="navbar-expand-md bs-sidebar hidden-print affix" role="complementary">
+    <div class="navbar-header">
+        <button type="button" class="navbar-toggler collapsed" data-bs-toggle="collapse" data-bs-target="#toc-collapse" title="Table of Contents">
+            <span class="fa fa-angle-down"></span>
+        </button>
+    </div>
+
+    
+    <div id="toc-collapse" class="navbar-collapse collapse card bg-body-tertiary">
+        <ul class="nav flex-column">
+            
+            <li class="nav-item" data-bs-level="1"><a href="#matrix-multiplication-example" class="nav-link">Matrix Multiplication example</a>
+              <ul class="nav flex-column">
+            <li class="nav-item" data-bs-level="2"><a href="#code-optimization" class="nav-link">Code optimization</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#automation" class="nav-link">Automation</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+              </ul>
+            </li>
+        </ul>
+    </div>
+</div></div>
+                    <div class="col-md-9" role="main">
+
+<h1 id="matrix-multiplication-example">Matrix Multiplication example</h1>
+<p>This tutorial has two parts: the first part is code optimization where
+techniques to optimize the matrix
+multiplication code are discussed, and the second part discusses how
+those techniques are automated by
+using the <code>swiftpack</code> decorator.</p>
+<h2 id="code-optimization">Code optimization</h2>
+<p>The optimization story behind <code>../../benchmarks/matmul_numba_bench.py</code> is a
+classic GEMM workflow: start with a
+slow reference kernel, then progressively improve locality, backend
+compilation, and parallelism until the
+execution pattern matches the hardware more closely.</p>
+<h3 id="0-naive-baseline">0- naive baseline</h3>
+<p>The simplest implementation is the direct triple loop:</p>
+<pre><code class="language-python">def matmul_python_0(A, B, C):
+    n = A.shape[0]
+    for i in range(n):
+        for j in range(n):
+            C[i, j] = 0.0
+            for k in range(n):
+                C[i, j] += A[i, k] * B[k, j]
+</code></pre>
+<p>This version is easy to verify and matches the mathematical definition,
+but it is dominated by Python-level
+loop overhead and poor memory access patterns. Each iteration performs
+Python object dispatch and repeated
+scalar updates, so it is orders of magnitude slower than optimized
+numerical kernels.</p>
+<p>This baseline is useful because it establishes the reference behavior:
+the result is correct, but the
+implementation is far from efficient.</p>
+<h3 id="1-numba-optimized">1- numba optimized</h3>
+<p>The first major improvement is to move the inner computation into Numba
+JIT code:</p>
+<pre><code class="language-python">@njit
+def matmul_numba_1(A, B, C):
+    n = A.shape[0]
+    for i in range(n):
+        for j in range(n):
+            C[i, j] = 0.0
+            for k in range(n):
+                C[i, j] += A[i, k] * B[k, j]
+</code></pre>
+<p>Numba compiles the loop nest to machine code, eliminating much of the
+Python overhead. The algorithm is still
+the same, but the kernel now runs efficiently on the CPU. This is the
+point at which we see a large jump in
+throughput without changing the mathematical structure.</p>
+<h3 id="2-loop-exchange">2- loop exchange</h3>
+<p>The next optimization is loop reordering. The naive kernel uses
+<code>i, j, k</code> order; the benchmark also compares
+other permutations such as <code>i, k, j</code> and <code>j, i, k</code>.</p>
+<pre><code class="language-python">@njit
+def matmul_2_ikj(A, B, C):
+    n = A.shape[0]
+    C.fill(0.0)
+    for i in range(n):
+        for k in range(n):
+            for j in range(n):
+                C[i, j] += A[i, k] * B[k, j]
+</code></pre>
+<p>The benefit comes from locality and reuse. With the <code>i, k, j</code> order, the
+code keeps a row of <code>A</code> and updates
+multiple <code>C[i, j]</code> entries as <code>k</code> changes, while <code>B[k, j]</code> is streamed
+in a way that better matches cache usage.
+This reduces the penalty from poor memory locality and often improves
+the compiled kernel substantially.</p>
+<p>As a general rule, loop order matters because the innermost loop
+determines the stride pattern of memory
+access. Reordering loops is often the simplest way to improve a
+cache-friendly GEMM kernel.</p>
+<h3 id="3-compiler-flags">3- compiler flags</h3>
+<p>Once the loop nest is structurally good, the next step is to let the
+backend aggressively optimize it:</p>
+<pre><code class="language-python">@njit(fastmath=True)
+def matmul_opt_flags_3(A, B, C):
+    n = A.shape[0]
+    C.fill(0.0)
+    for i in range(n):
+        for k in range(n):
+            for j in range(n):
+                C[i, j] += A[i, k] * B[k, j]
+</code></pre>
+<p><code>fastmath=True</code> enables mathematically aggressive optimizations such as
+reassociation and vectorization-friendly
+transformations. These can increase throughput for floating-point
+kernels, especially when the code is
+numerically well-behaved and the result tolerances are not overly
+strict.</p>
+<p>This optimization does not change the algorithm; it changes how the
+compiler is allowed to transform the kernel.
+It is a pure backend optimization, not a rewrite of the matrix formula.</p>
+<h3 id="4-parallelism">4- parallelism</h3>
+<p>A high-level parallelism improvement is to parallelize the outer loop
+with <code>prange</code>:</p>
+<pre><code class="language-python">@njit(parallel=True, fastmath=True)
+def matmul_parallel_i_4(A, B, C):
+    n = A.shape[0]
+    C.fill(0.0)
+    for i in prange(n):
+        for k in range(n):
+            for j in range(n):
+                C[i, j] += A[i, k] * B[k, j]
+</code></pre>
+<p>This is a safe and effective parallel strategy because different values
+of <code>i</code> write to disjoint rows of <code>C</code>.
+Each thread can compute one output row independently, so the work is
+naturally parallelized.</p>
+<p>The benchmark also compares other parallel choices such as <code>prange</code> over
+<code>j</code> or <code>k</code>, but the <code>i</code>-parallel form is
+especially natural for row-wise matrix multiplication. Parallelization
+can give an additional large gain once the
+single-threaded implementation is already efficient.</p>
+<h3 id="5-loop-tiling">5- loop tiling</h3>
+<p>The final major optimization is loop tiling or blocking. Instead of
+processing the entire matrix in one pass, we
+work on sub-blocks that fit better into cache:</p>
+<pre><code class="language-python">@njit(parallel=True, fastmath=True)
+def matmul_blocked_parallel_5(A, B, C):
+    n = A.shape[0]
+    bs = BLOCK_SIZE
+    C.fill(0.0)
+
+    num_i_blocks = (n + bs - 1) // bs
+
+    for b in prange(num_i_blocks):
+        i_block = b * bs
+        i_end = min(i_block + bs, n)
+
+        for k_block in range(0, n, bs):
+            for j_block in range(0, n, bs):
+                k_end = min(k_block + bs, n)
+                j_end = min(j_block + bs, n)
+
+                for i in range(i_block, i_end):
+                    for k in range(k_block, k_end):
+                        for j in range(j_block, j_end):
+                            C[i, j] += A[i, k] * B[k, j]
+</code></pre>
+<p>The key idea is to split the computation into tiles of size
+<code>BLOCK_SIZE</code>, so each block of <code>A</code>, <code>B</code>, and <code>C</code>
+fits in cache instead of streaming huge sections of the matrices through
+memory. This reduces cache misses and
+keeps the arithmetic core fed with data more efficiently.</p>
+<p>The benchmark also explores blocked variants that use <code>np.dot</code> on
+submatrices and temporary buffers. These are
+closer to a high-performance BLAS-style GEMM and can be even faster when
+the tile size is chosen well.</p>
+<p>The overall progression is shown 
+in <img alt="Figure 1" src="../matmul_numba_bench_512.png" /> 
+and can be summarized as:</p>
+<ol>
+<li>correct but slow Python triple loop,</li>
+<li>JIT compilation to remove interpreter overhead,</li>
+<li>loop reordering to improve locality,</li>
+<li>backend compiler flags for vectorization and reassociation,</li>
+<li>parallel outer loops with <code>prange</code>, and</li>
+<li>cache-aware tiling to reduce memory traffic.</li>
+</ol>
+<p>The table summary is (copied from benchmark output):</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">Baseline Implementation</th>
+<th style="text-align: left;">GFLOP/s</th>
+<th style="text-align: left;">Abs Speedup</th>
+<th style="text-align: left;">Rel Speedup</th>
+<th style="text-align: left;">Correct</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">0_python_naive</td>
+<td style="text-align: left;">0.014</td>
+<td style="text-align: left;">1.00x</td>
+<td style="text-align: left;">1.00x</td>
+<td style="text-align: left;">PASS</td>
+</tr>
+<tr>
+<td style="text-align: left;">1_numba_naive</td>
+<td style="text-align: left;">2.466</td>
+<td style="text-align: left;">2.79x</td>
+<td style="text-align: left;">2.79x</td>
+<td style="text-align: left;">PASS</td>
+</tr>
+<tr>
+<td style="text-align: left;">2_order_ijk</td>
+<td style="text-align: left;">2.466</td>
+<td style="text-align: left;">2.79x</td>
+<td style="text-align: left;">1.00x</td>
+<td style="text-align: left;">PASS</td>
+</tr>
+<tr>
+<td style="text-align: left;">2_order_ikj</td>
+<td style="text-align: left;">20.538</td>
+<td style="text-align: left;">23.21x</td>
+<td style="text-align: left;">8.33x</td>
+<td style="text-align: left;">PASS</td>
+</tr>
+<tr>
+<td style="text-align: left;">2_order_jik</td>
+<td style="text-align: left;">2.376</td>
+<td style="text-align: left;">2.69x</td>
+<td style="text-align: left;">0.12x</td>
+<td style="text-align: left;">PASS</td>
+</tr>
+<tr>
+<td style="text-align: left;">2_order_jki</td>
+<td style="text-align: left;">0.590</td>
+<td style="text-align: left;">0.67x</td>
+<td style="text-align: left;">0.25x</td>
+<td style="text-align: left;">PASS</td>
+</tr>
+<tr>
+<td style="text-align: left;">2_order_kij</td>
+<td style="text-align: left;">19.316</td>
+<td style="text-align: left;">21.83x</td>
+<td style="text-align: left;">32.74x</td>
+<td style="text-align: left;">PASS</td>
+</tr>
+<tr>
+<td style="text-align: left;">2_order_kji</td>
+<td style="text-align: left;">0.597</td>
+<td style="text-align: left;">0.67x</td>
+<td style="text-align: left;">0.03x</td>
+<td style="text-align: left;">PASS</td>
+</tr>
+<tr>
+<td style="text-align: left;">3_fastmath_ikj</td>
+<td style="text-align: left;">20.538</td>
+<td style="text-align: left;">23.21x</td>
+<td style="text-align: left;">34.42x</td>
+<td style="text-align: left;">PASS</td>
+</tr>
+<tr>
+<td style="text-align: left;">4_parallel_i</td>
+<td style="text-align: left;">20.546</td>
+<td style="text-align: left;">23.22x</td>
+<td style="text-align: left;">1.00x</td>
+<td style="text-align: left;">PASS</td>
+</tr>
+<tr>
+<td style="text-align: left;">4_parallel_k</td>
+<td style="text-align: left;">19.024</td>
+<td style="text-align: left;">21.50x</td>
+<td style="text-align: left;">0.93x</td>
+<td style="text-align: left;">PASS</td>
+</tr>
+<tr>
+<td style="text-align: left;">4_parallel_j</td>
+<td style="text-align: left;">2.581</td>
+<td style="text-align: left;">2.92x</td>
+<td style="text-align: left;">0.14x</td>
+<td style="text-align: left;">PASS</td>
+</tr>
+<tr>
+<td style="text-align: left;">5_blocked_parallel_i</td>
+<td style="text-align: left;">6.945</td>
+<td style="text-align: left;">7.85x</td>
+<td style="text-align: left;">2.69x</td>
+<td style="text-align: left;">PASS</td>
+</tr>
+<tr>
+<td style="text-align: left;">6_blocked_np_dot</td>
+<td style="text-align: left;">28.775</td>
+<td style="text-align: left;">32.52x</td>
+<td style="text-align: left;">4.14x</td>
+<td style="text-align: left;">PASS</td>
+</tr>
+<tr>
+<td style="text-align: left;">7_blocked_temp_copy</td>
+<td style="text-align: left;">30.491</td>
+<td style="text-align: left;">34.46x</td>
+<td style="text-align: left;">1.06x</td>
+<td style="text-align: left;">PASS</td>
+</tr>
+<tr>
+<td style="text-align: left;">8_two_level_blocked_temp_np_dot</td>
+<td style="text-align: left;">31.485</td>
+<td style="text-align: left;">35.59x</td>
+<td style="text-align: left;">1.03x</td>
+<td style="text-align: left;">PASS</td>
+</tr>
+<tr>
+<td style="text-align: left;">9_blocked_zero_alloc</td>
+<td style="text-align: left;">32.819</td>
+<td style="text-align: left;">37.09x</td>
+<td style="text-align: left;">1.04x</td>
+<td style="text-align: left;">PASS</td>
+</tr>
+<tr>
+<td style="text-align: left;">10_np_dot</td>
+<td style="text-align: left;">67.542</td>
+<td style="text-align: left;">76.34x</td>
+<td style="text-align: left;">2.06x</td>
+<td style="text-align: left;">PASS</td>
+</tr>
+</tbody>
+</table>
+<p>Note. numbers are obtained from Intel(R) Core(TM) Ultra 7 265 with 
+20 cores and 40 threads, 30MB cache with avx2. </p>
+<p>This progression is the core optimization story behind matrix
+multiplication in Numba and is exactly the pattern
+that <code>swiftpack</code> tries to automate.</p>
+<h2 id="automation">Automation</h2></div>
+            </div>
+        </div>
+
+        <footer class="col-md-12">
+            <hr>
+            <p>Documentation built with <a href="https://www.mkdocs.org/">MkDocs</a>.</p>
+        </footer>
+        <script src="../../js/bootstrap.bundle.min.js"></script>
+        <script>
+            var base_url = "../..",
+                shortcuts = {"help": 191, "next": 78, "previous": 80, "search": 83};
+        </script>
+        <script src="../../js/base.js"></script>
+        <script src="../../search/main.js"></script>
+
+        <div class="modal" id="mkdocs_search_modal" tabindex="-1" role="dialog" aria-labelledby="searchModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4 class="modal-title" id="searchModalLabel">Search</h4>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p>From here you can search these documents. Enter your search terms below.</p>
+                <form>
+                    <div class="form-group">
+                        <input type="search" class="form-control" placeholder="Search..." id="mkdocs-search-query" title="Type search term here">
+                    </div>
+                </form>
+                <div id="mkdocs-search-results" data-no-results-text="No results found"></div>
+            </div>
+            <div class="modal-footer">
+            </div>
+        </div>
+    </div>
+</div><div class="modal" id="mkdocs_keyboard_modal" tabindex="-1" role="dialog" aria-labelledby="keyboardModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4 class="modal-title" id="keyboardModalLabel">Keyboard Shortcuts</h4>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th style="width: 20%;">Keys</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td class="help shortcut"><kbd>?</kbd></td>
+                    <td>Open this help</td>
+                  </tr>
+                  <tr>
+                    <td class="next shortcut"><kbd>n</kbd></td>
+                    <td>Next page</td>
+                  </tr>
+                  <tr>
+                    <td class="prev shortcut"><kbd>p</kbd></td>
+                    <td>Previous page</td>
+                  </tr>
+                  <tr>
+                    <td class="search shortcut"><kbd>s</kbd></td>
+                    <td>Search</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="modal-footer">
+            </div>
+        </div>
+    </div>
+</div>
+
+    </body>
+</html>

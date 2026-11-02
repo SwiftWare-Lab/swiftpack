@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="light">
+    <head>
+        <meta charset="utf-8">
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        
+        
+        <link rel="canonical" href="https://swiftware-lab.github.io/switpack/compiler/basics/">
+        <link rel="shortcut icon" href="../../img/favicon.ico">
+        <title>Code Representation - SwiftPack Docs</title>
+        <link href="../../css/bootstrap.min.css" rel="stylesheet">
+        <link href="../../css/fontawesome.min.css" rel="stylesheet">
+        <link href="../../css/brands.min.css" rel="stylesheet">
+        <link href="../../css/solid.min.css" rel="stylesheet">
+        <link href="../../css/v4-font-face.min.css" rel="stylesheet">
+        <link href="../../css/base.css" rel="stylesheet">
+        <link id="hljs-light" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" >
+        <link id="hljs-dark" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github-dark.min.css" disabled>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+        <script>hljs.highlightAll();</script> 
+    </head>
+
+    <body>
+        <div class="navbar fixed-top navbar-expand-lg navbar-dark bg-primary">
+            <div class="container">
+                <a class="navbar-brand" href="../..">SwiftPack Docs</a>
+                <!-- Expander button -->
+                <button type="button" class="navbar-toggler" data-bs-toggle="collapse" data-bs-target="#navbar-collapse" aria-controls="navbar-collapse" aria-expanded="false" aria-label="Toggle navigation">
+                    <span class="navbar-toggler-icon"></span>
+                </button>
+
+                <!-- Expanded navigation -->
+                <div id="navbar-collapse" class="navbar-collapse collapse">
+                        <!-- Main navigation -->
+                        <ul class="nav navbar-nav">
+                            <li class="nav-item">
+                                <a href="../.." class="nav-link">Home</a>
+                            </li>
+                            <li class="nav-item dropdown">
+                                <a href="#" class="nav-link dropdown-toggle" role="button" data-bs-toggle="dropdown"  aria-expanded="false">Getting Started</a>
+                                <ul class="dropdown-menu">
+                                    
+<li>
+    <a href="../../getting-started/usage/" class="dropdown-item">Usage demo</a>
+</li>
+                                </ul>
+                            </li>
+                            <li class="nav-item dropdown">
+                                <a href="#" class="nav-link dropdown-toggle active" aria-current="page" role="button" data-bs-toggle="dropdown"  aria-expanded="false">Compiler Pipeline</a>
+                                <ul class="dropdown-menu">
+                                    
+<li>
+    <a href="../overview/" class="dropdown-item">Overview</a>
+</li>
+                                    
+<li>
+    <a href="./" class="dropdown-item active" aria-current="page">Code Representation</a>
+</li>
+                                    
+<li>
+    <a href="../local_analysis/" class="dropdown-item">Local Analysis</a>
+</li>
+                                    
+<li>
+    <a href="../loop_transformations/" class="dropdown-item">Loop Transformations</a>
+</li>
+                                    
+<li>
+    <a href="../extending/" class="dropdown-item">Extending the Compiler</a>
+</li>
+                                </ul>
+                            </li>
+                            <li class="nav-item dropdown">
+                                <a href="#" class="nav-link dropdown-toggle" role="button" data-bs-toggle="dropdown"  aria-expanded="false">Benchmark</a>
+                                <ul class="dropdown-menu">
+                                    
+<li>
+    <a href="../../benchmarks/matmul/" class="dropdown-item">Matrix multiplication</a>
+</li>
+                                    
+<li>
+    <a href="../../benchmarks/cholesky/" class="dropdown-item">Cholesky decomposition</a>
+</li>
+                                </ul>
+                            </li>
+                        </ul>
+
+                    <ul class="nav navbar-nav ms-md-auto">
+                        <li class="nav-item">
+                            <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#mkdocs_search_modal">
+                                <i class="fa fa-search"></i> Search
+                            </a>
+                        </li>
+                            <li class="nav-item">
+                                <a rel="prev" href="../overview/" class="nav-link">
+                                    <i class="fa fa-arrow-left"></i> Previous
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a rel="next" href="../local_analysis/" class="nav-link">
+                                    Next <i class="fa fa-arrow-right"></i>
+                                </a>
+                            </li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="container">
+            <div class="row">
+                    <div class="col-md-3"><div class="navbar-expand-md bs-sidebar hidden-print affix" role="complementary">
+    <div class="navbar-header">
+        <button type="button" class="navbar-toggler collapsed" data-bs-toggle="collapse" data-bs-target="#toc-collapse" title="Table of Contents">
+            <span class="fa fa-angle-down"></span>
+        </button>
+    </div>
+
+    
+    <div id="toc-collapse" class="navbar-collapse collapse card bg-body-tertiary">
+        <ul class="nav flex-column">
+            
+            <li class="nav-item" data-bs-level="1"><a href="#code-representation-and-optimization-with-numba" class="nav-link">Code Representation and Optimization with Numba</a>
+              <ul class="nav flex-column">
+            <li class="nav-item" data-bs-level="2"><a href="#code-representation" class="nav-link">Code Representation</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#code-optimization-techniques" class="nav-link">Code Optimization Techniques</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+              </ul>
+            </li>
+        </ul>
+    </div>
+</div></div>
+                    <div class="col-md-9" role="main">
+
+<h1 id="code-representation-and-optimization-with-numba">Code Representation and Optimization with Numba</h1>
+<h2 id="code-representation">Code Representation</h2>
+<p>Code representation bridges human-readable source code and executable 
+target instructions. Compilers parse and lower source code through multiple 
+levels of Intermediate Representation (IR) to analyze semantics and 
+apply performance optimizations.</p>
+<hr />
+<h3 id="abstract-syntax-tree-ast">Abstract Syntax Tree (AST)</h3>
+<p>An <strong>Abstract Syntax Tree (AST)</strong> is a hierarchical, tree-structured 
+representation of source code produced during syntactic analysis. 
+It strips away purely syntactic tokens (such as semicolons, explicit 
+parentheses, and whitespace) while retaining structural semantics, 
+operator precedence, and parent-child execution scopes.</p>
+<ul>
+<li><strong>Nodes:</strong> Represent structural constructs such as operators 
+ (<code>+</code>, <code>*</code>), statements (<code>if</code>, <code>while</code>), or expressions (<code>BinaryOp</code>).</li>
+<li><strong>Leaves:</strong> Represent terminal operands, such as variable 
+  names (<code>Name</code>) or literals (<code>Constant</code>).</li>
+<li><strong>Usage:</strong> Used by parsers, linters, semantic analyzers, static 
+security checkers, and source-to-source compilers.</li>
+</ul>
+<hr />
+<h3 id="list-of-instructions">List of Instructions</h3>
+<p>Lowering an AST into a linear <strong>List of Instructions</strong> flattens the 
+tree structure into sequential abstract machine instructions. This flat 
+Intermediate Representation (IR) often uses <strong>Three-Address Code (3AC)</strong> 
+or register-based bytecode instructions where each operation has at most three operands.</p>
+<ul>
+<li><strong>Characteristics:</strong> Simple instruction semantics (e.g., <code>LOAD</code>, <code>ADD</code>, <code>STORE</code>, <code>JUMP_IF_FALSE</code>).</li>
+<li><strong>Usage:</strong> Simplifies register allocation, instruction selection, and target machine code emission. In <strong>Numba</strong>, Python AST is lowered into Numba IR instructions (such as <code>jump</code>, <code>branch</code>, <code>call</code>, and assignment operations) before being passed to LLVM.</li>
+</ul>
+<hr />
+<h3 id="control-flow-graph-cfg">Control Flow Graph (CFG)</h3>
+<p>A <strong>Control Flow Graph (CFG)</strong> is a directed graph $(V, E)$ that explicitly models all possible execution paths through a program unit (such as a function or subroutine).</p>
+<ul>
+<li><strong>Nodes ($V$):</strong> Basic Blocks containing sequential instructions.</li>
+<li><strong>Edges ($E$):</strong> Control transfers via conditional branches, unconditional jumps, or function calls.</li>
+<li></li>
+</ul>
+<h3 id="basic-blocks">Basic Blocks</h3>
+<p>Basic blocks are sequences of instructions with no branches except at the end. They are the building blocks of control flow graphs.</p>
+<p>CFG is applied to basic blocks.</p>
+<h2 id="code-optimization-techniques">Code Optimization Techniques</h2>
+<p>Depending on the scope of optimization, code optimization is either <strong>Local Optimization</strong> (operating within a single basic block) or <strong>Global Optimization</strong> (operating across basic blocks within a CFG or across function boundaries via Interprocedural Analysis).</p>
+<pre><code>                ┌────────────────────────────────────────┐
+                │      Code Optimization Scope           │
+                └───────────────────┬────────────────────┘
+                                    │
+          ┌─────────────────────────┴─────────────────────────┐
+          ▼                                                   ▼
+</code></pre>
+<p>┌────────────────────┐                              ┌────────────────────┐
+   │ Local Optimization │                              │ Global Optimization│
+   │ (Single Basic Block│                              │ (Across CFG /      │
+   │      Scope)        │                              │ Interprocedural)   │
+   └────────────────────┘                              └────────────────────┘</p>
+<p>Below is the classification of optimization techniques across four fundamental domains:</p>
+<hr />
+<h3 id="1-loop-optimization">1. Loop Optimization</h3>
+<p>Loops represent the highest execution-density areas in programs. Optimizing loop bounds, array index access, and iteration order yields significant performance gains.</p>
+<ul>
+<li><strong>Loop Invariant Code Motion (Hoisting):</strong> Moves computations whose values do not change across iterations outside the loop header.</li>
+<li><strong>Loop Unrolling:</strong> Replicates the loop body to decrease loop overhead (branch checks, induction increment) and expose instruction-level parallelism (ILP).</li>
+<li><strong>Loop Tiling (Blocking):</strong> Reorganizes loop access patterns to fit within CPU L1/L2 cache lines, minimizing cache misses.</li>
+<li><strong>Loop Exchange (Permutation):</strong> Reorders nested loops to improve data locality and vectorization opportunities.</li>
+</ul>
+<hr />
+<h3 id="2-data-structure-optimization">2. Data Structure Optimization</h3>
+<p>Optimizes memory access patterns, layout, and allocation overheads.</p>
+<ul>
+<li><strong>Structure-of-Arrays (SoA) vs. Array-of-Structures (AoS):</strong> Reorganizes struct memory layouts to optimize spatial cache locality and improve vectorization.</li>
+<li><strong>Scalar Replacement of Aggregates (SRA):</strong> Replaces aggregate objects/tuples with independent scalar variables that can fit directly in CPU registers.</li>
+<li><strong>Sparsity Exploitation:</strong> Detects and optimizes operations on sparse data structures (e.g., sparse matrices) to avoid unnecessary computations and memory accesses.</li>
+</ul>
+<hr />
+<h3 id="3-function-optimization">3. Function Optimization</h3>
+<p>Reduces call-stack overhead and optimizes calling conventions.</p>
+<ul>
+<li><strong>Function Inlining:</strong> Replaces a function call site with the body of the target function, eliminating call/return stack frames and enabling downstream compiler optimizations.</li>
+<li><strong>Dead Argument Elimination:</strong> Removes unused parameters from function signatures to eliminate unnecessary argument passing in registers or stack frames.</li>
+<li><strong>Tail Call Optimization (TCO):</strong> Replaces recursive function call stack frames with jumps when the call is in the tail position, converting recursion to $O(1)$ stack space.</li>
+</ul>
+<hr />
+<h3 id="4-logic-expression-optimization">4. Logic &amp; Expression Optimization</h3>
+<p>Simplifies arithmetic and logical execution paths.</p>
+<ul>
+<li><strong>Constant Folding &amp; Propagation:</strong> Pre-calculates constant operations at compile time (e.g., <code>3 * 8</code> $\rightarrow$ <code>24</code>) and propagates known constant values through expressions.</li>
+<li><strong>Dead Code Elimination (DCE):</strong> Identifies and removes unreachable blocks or instructions whose outputs are never read.</li>
+<li><strong>Strength Reduction:</strong> Replaces expensive operations with faster equivalent operations (e.g., replacing <code>x * 8</code> with bitwise shift <code>x &lt;&lt; 3</code>, or <code>x ** 2</code> with <code>x * x</code>).</li>
+<li><strong>Common Subexpression Elimination (CSE):</strong> Detects redundant expressions and reuses previously computed values instead of recalculating them.</li>
+</ul></div>
+            </div>
+        </div>
+
+        <footer class="col-md-12">
+            <hr>
+            <p>Documentation built with <a href="https://www.mkdocs.org/">MkDocs</a>.</p>
+        </footer>
+        <script src="../../js/bootstrap.bundle.min.js"></script>
+        <script>
+            var base_url = "../..",
+                shortcuts = {"help": 191, "next": 78, "previous": 80, "search": 83};
+        </script>
+        <script src="../../js/base.js"></script>
+        <script src="../../search/main.js"></script>
+
+        <div class="modal" id="mkdocs_search_modal" tabindex="-1" role="dialog" aria-labelledby="searchModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4 class="modal-title" id="searchModalLabel">Search</h4>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p>From here you can search these documents. Enter your search terms below.</p>
+                <form>
+                    <div class="form-group">
+                        <input type="search" class="form-control" placeholder="Search..." id="mkdocs-search-query" title="Type search term here">
+                    </div>
+                </form>
+                <div id="mkdocs-search-results" data-no-results-text="No results found"></div>
+            </div>
+            <div class="modal-footer">
+            </div>
+        </div>
+    </div>
+</div><div class="modal" id="mkdocs_keyboard_modal" tabindex="-1" role="dialog" aria-labelledby="keyboardModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4 class="modal-title" id="keyboardModalLabel">Keyboard Shortcuts</h4>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th style="width: 20%;">Keys</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td class="help shortcut"><kbd>?</kbd></td>
+                    <td>Open this help</td>
+                  </tr>
+                  <tr>
+                    <td class="next shortcut"><kbd>n</kbd></td>
+                    <td>Next page</td>
+                  </tr>
+                  <tr>
+                    <td class="prev shortcut"><kbd>p</kbd></td>
+                    <td>Previous page</td>
+                  </tr>
+                  <tr>
+                    <td class="search shortcut"><kbd>s</kbd></td>
+                    <td>Search</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="modal-footer">
+            </div>
+        </div>
+    </div>
+</div>
+
+    </body>
+</html>

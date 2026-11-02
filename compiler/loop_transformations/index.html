@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="light">
+    <head>
+        <meta charset="utf-8">
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        
+        
+        <link rel="canonical" href="https://swiftware-lab.github.io/switpack/compiler/loop_transformations/">
+        <link rel="shortcut icon" href="../../img/favicon.ico">
+        <title>Loop Transformations - SwiftPack Docs</title>
+        <link href="../../css/bootstrap.min.css" rel="stylesheet">
+        <link href="../../css/fontawesome.min.css" rel="stylesheet">
+        <link href="../../css/brands.min.css" rel="stylesheet">
+        <link href="../../css/solid.min.css" rel="stylesheet">
+        <link href="../../css/v4-font-face.min.css" rel="stylesheet">
+        <link href="../../css/base.css" rel="stylesheet">
+        <link id="hljs-light" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" >
+        <link id="hljs-dark" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github-dark.min.css" disabled>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+        <script>hljs.highlightAll();</script> 
+    </head>
+
+    <body>
+        <div class="navbar fixed-top navbar-expand-lg navbar-dark bg-primary">
+            <div class="container">
+                <a class="navbar-brand" href="../..">SwiftPack Docs</a>
+                <!-- Expander button -->
+                <button type="button" class="navbar-toggler" data-bs-toggle="collapse" data-bs-target="#navbar-collapse" aria-controls="navbar-collapse" aria-expanded="false" aria-label="Toggle navigation">
+                    <span class="navbar-toggler-icon"></span>
+                </button>
+
+                <!-- Expanded navigation -->
+                <div id="navbar-collapse" class="navbar-collapse collapse">
+                        <!-- Main navigation -->
+                        <ul class="nav navbar-nav">
+                            <li class="nav-item">
+                                <a href="../.." class="nav-link">Home</a>
+                            </li>
+                            <li class="nav-item dropdown">
+                                <a href="#" class="nav-link dropdown-toggle" role="button" data-bs-toggle="dropdown"  aria-expanded="false">Getting Started</a>
+                                <ul class="dropdown-menu">
+                                    
+<li>
+    <a href="../../getting-started/usage/" class="dropdown-item">Usage demo</a>
+</li>
+                                </ul>
+                            </li>
+                            <li class="nav-item dropdown">
+                                <a href="#" class="nav-link dropdown-toggle active" aria-current="page" role="button" data-bs-toggle="dropdown"  aria-expanded="false">Compiler Pipeline</a>
+                                <ul class="dropdown-menu">
+                                    
+<li>
+    <a href="../overview/" class="dropdown-item">Overview</a>
+</li>
+                                    
+<li>
+    <a href="../basics/" class="dropdown-item">Code Representation</a>
+</li>
+                                    
+<li>
+    <a href="../local_analysis/" class="dropdown-item">Local Analysis</a>
+</li>
+                                    
+<li>
+    <a href="./" class="dropdown-item active" aria-current="page">Loop Transformations</a>
+</li>
+                                    
+<li>
+    <a href="../extending/" class="dropdown-item">Extending the Compiler</a>
+</li>
+                                </ul>
+                            </li>
+                            <li class="nav-item dropdown">
+                                <a href="#" class="nav-link dropdown-toggle" role="button" data-bs-toggle="dropdown"  aria-expanded="false">Benchmark</a>
+                                <ul class="dropdown-menu">
+                                    
+<li>
+    <a href="../../benchmarks/matmul/" class="dropdown-item">Matrix multiplication</a>
+</li>
+                                    
+<li>
+    <a href="../../benchmarks/cholesky/" class="dropdown-item">Cholesky decomposition</a>
+</li>
+                                </ul>
+                            </li>
+                        </ul>
+
+                    <ul class="nav navbar-nav ms-md-auto">
+                        <li class="nav-item">
+                            <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#mkdocs_search_modal">
+                                <i class="fa fa-search"></i> Search
+                            </a>
+                        </li>
+                            <li class="nav-item">
+                                <a rel="prev" href="../local_analysis/" class="nav-link">
+                                    <i class="fa fa-arrow-left"></i> Previous
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a rel="next" href="../extending/" class="nav-link">
+                                    Next <i class="fa fa-arrow-right"></i>
+                                </a>
+                            </li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="container">
+            <div class="row">
+                    <div class="col-md-3"><div class="navbar-expand-md bs-sidebar hidden-print affix" role="complementary">
+    <div class="navbar-header">
+        <button type="button" class="navbar-toggler collapsed" data-bs-toggle="collapse" data-bs-target="#toc-collapse" title="Table of Contents">
+            <span class="fa fa-angle-down"></span>
+        </button>
+    </div>
+
+    
+    <div id="toc-collapse" class="navbar-collapse collapse card bg-body-tertiary">
+        <ul class="nav flex-column">
+            
+            <li class="nav-item" data-bs-level="1"><a href="#loop-optimization" class="nav-link">Loop optimization</a>
+              <ul class="nav flex-column">
+            <li class="nav-item" data-bs-level="2"><a href="#loop-exchange" class="nav-link">Loop exchange</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#loop-tiling" class="nav-link">Loop Tiling</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#loop-parallelism" class="nav-link">Loop Parallelism</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#loop-unrolling" class="nav-link">Loop unrolling</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#loop-fusion" class="nav-link">Loop fusion</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+              </ul>
+            </li>
+        </ul>
+    </div>
+</div></div>
+                    <div class="col-md-9" role="main">
+
+<h1 id="loop-optimization">Loop optimization</h1>
+<h2 id="loop-exchange">Loop exchange</h2>
+<p>The directive <code>loop_exchange</code> is used to reorder nested loops. It 
+takes a tuple of loop variable names, e.g., <code>("j", "k")</code>, and reorders 
+the loops to match that order.</p>
+<h3 id="directive-syntax">Directive syntax</h3>
+<p>The scheduler tuple for the scheduler is:</p>
+<pre><code>   (LoopExchange, {&quot;target_loops&quot;: (&quot;j&quot;, &quot;k&quot;)})
+</code></pre>
+<p>where <code>target_loops</code> is a tuple of loop variable names to reorder. 
+The scheduler user directive is:</p>
+<pre><code>   @swiftpack(scheduler=[(LoopExchange, {&quot;target_loops&quot;: (&quot;j&quot;, &quot;k&quot;)})])
+</code></pre>
+<h3 id="legality-check">Legality check:</h3>
+<p>The loop exchange transformation is legal if the specified loop variables 
+exist within the nested loop hierarchy and the transformation does not 
+violate any data dependencies. The legality checker generates a Data Dependence 
+Graph (DDG) from the AST and evaluates all dependence distance vectors. 
+Swapping two loop levels is proven legal if and only if <strong>no dependence vector 
+becomes lexicographically negative</strong> (i.e., the first non-zero element in 
+the permuted distance vector remains non-negative) after the exchange.</p>
+<h3 id="transformation">Transformation:</h3>
+<p>The transformation reorders the nested loops according to the specified
+order of loop variables. It updates the AST to reflect the new loop order,
+ensuring that the loop bodies are correctly nested and that the loop
+variables are updated accordingly.</p>
+<h2 id="loop-tiling">Loop Tiling</h2>
+<p>The directive loop_tiling is used to block or tile loops (combining 
+strip-mining and loop permutation) to dramatically improve cache 
+locality and spatial reuse. It takes a target loop variable name 
+(e.g., "i") and an optional block size (e.g., block_size=32).</p>
+<h3 id="directive-syntax_1">Directive syntax</h3>
+<p>The scheduler tuple for the scheduler is: </p>
+<pre><code>   (LoopTiling, {&quot;target_loop&quot;: &quot;i&quot;, &quot;tile_size&quot;: 32})
+</code></pre>
+<p>where <code>target_loop</code> is the loop variable to tile and <code>tile_size</code> is the
+number of iterations per tile. The default tile size is 32.
+The scheduler user directive is: </p>
+<pre><code>   @swiftpack(scheduler=[(LoopTiling, {&quot;target_loop&quot;: &quot;i&quot;, &quot;tile_size&quot;: 32})])
+</code></pre>
+<h3 id="legality-check_1">Legality check:</h3>
+<p>The loop tiling transformation is legal if the target loop exists within 
+the loop hierarchy and carries no backward (negative) distance 
+dependencies. The legality checker generates a Data Dependence Graph (DG) 
+and evaluates the distance vector components corresponding to the target 
+loop level. Tiling is proven safe if all dependence vector entries for 
+the targeted dimension are greater than or equal to zero ($\ge 0$), 
+guaranteeing that block execution order does not violate program 
+semantics or causality.</p>
+<h3 id="transformation_1">Transformation:</h3>
+<p>The transformation performs strip-mining on the target loop, splitting 
+it into two nested loops:
+* Outer Tile Loop (_tile): Steps through the iteration space in 
+  increments equal to the specified block_size.
+* Inner Point Loop: Iterates locally within the current tile block, 
+  bounded by the tile boundaries. bounded by min(tile_start + 
+  block_size, upper_bound).
+The original loop body is safely nested inside the inner loop, 
+preserving all variable bindings and computational logic.</p>
+<h2 id="loop-parallelism">Loop Parallelism</h2>
+<p>The directive LoopParallelism is used to enable multithreaded execution 
+across iterations of a target loop (such as lowering to OpenMP or 
+parallel runtimes via prange). It takes a loop variable name, e.g., 
+"i".</p>
+<h3 id="directive-syntax_2">Directive syntax</h3>
+<p>The scheduler tuple for the scheduler is:</p>
+<pre><code>   (LoopParallelism, {&quot;loop_var&quot;: &quot;i&quot;})
+</code></pre>
+<p>where <code>loop_var</code> is the loop variable to parallelize. The scheduler user 
+directive is:</p>
+<pre><code>   @swiftpack(scheduler=[(LoopParallelism, {&quot;loop_var&quot;: &quot;i&quot;})])
+</code></pre>
+<h3 id="legality-check_2">Legality check:</h3>
+<p>The loop parallelism transformation is legal if and only if the target 
+loop carries no loop-carried dependencies. The legality checker analyzes 
+the Data Dependence Graph (DDG) and inspects the distance vector 
+components at the depth of the target loop variable. If all distance 
+entries for that loop level are equal to 0 (indicating no 
+cross-iteration hazards), the loop is proven safe for parallel 
+execution. Any non-zero distance indicates a data race hazard, causing 
+the legality check to fail.</p>
+<h3 id="transformation_2">Transformation:</h3>
+<p>The transformation searches the AST for the For loop matching the 
+specified loop_var and replaces its iterator function from sequential 
+range() to parallel prange(), enabling concurrent scheduling across 
+available thread pools or hardware execution lanes.</p>
+<h2 id="loop-unrolling">Loop unrolling</h2>
+<p>The directive LoopUnrolling is used to replicate the body of a loop 
+multiple times, reducing branch overhead and expanding Instruction-Level 
+Parallelism (ILP). It takes a target loop variable name (e.g., "k") and 
+an unrolling factor (e.g., factor=4).</p>
+<h3 id="directive-syntax_3">Directive syntax</h3>
+<p>The scheduler tuple for the scheduler is:</p>
+<pre><code>   (LoopUnrolling, {&quot;loop_var&quot;: &quot;k&quot;, &quot;factor&quot;: 4})
+</code></pre>
+<p>where <code>loop_var</code> is the loop variable to unroll and <code>factor</code> is the
+number of times to replicate the loop body. The scheduler user directive 
+is:</p>
+<pre><code>   @swiftpack(scheduler=[(LoopUnrolling, {&quot;loop_var&quot;: &quot;k&quot;, &quot;factor&quot;: 4})])
+</code></pre>
+<h3 id="legality-check_3">Legality check:</h3>
+<p>Standard scalar loop unrolling is always legal for inner loops because 
+duplicating independent scalar iteration bodies does not alter data 
+dependence distances or execution ordering across iterations. The 
+legality check verifies that the specified loop_var exists in the 
+targeted loop scope.</p>
+<h3 id="transformation_3">Transformation:</h3>
+<p>The transformation modifies the loop AST in two ways:
+1. Stride Scaling: Multiplies the step size of the loop's range() 
+iterator by the specified factor (e.g., stepping by 4 instead of 1).
+2. Body Duplication &amp; Index Offsetting: Replicates the loop body 
+   factor times, substituting the loop variable with static index 
+   offsets (i, i + 1, i + 2, etc.) in subsequent unrolled copies.</p>
+<h2 id="loop-fusion">Loop fusion</h2>
+<p>TODO: </p></div>
+            </div>
+        </div>
+
+        <footer class="col-md-12">
+            <hr>
+            <p>Documentation built with <a href="https://www.mkdocs.org/">MkDocs</a>.</p>
+        </footer>
+        <script src="../../js/bootstrap.bundle.min.js"></script>
+        <script>
+            var base_url = "../..",
+                shortcuts = {"help": 191, "next": 78, "previous": 80, "search": 83};
+        </script>
+        <script src="../../js/base.js"></script>
+        <script src="../../search/main.js"></script>
+
+        <div class="modal" id="mkdocs_search_modal" tabindex="-1" role="dialog" aria-labelledby="searchModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4 class="modal-title" id="searchModalLabel">Search</h4>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p>From here you can search these documents. Enter your search terms below.</p>
+                <form>
+                    <div class="form-group">
+                        <input type="search" class="form-control" placeholder="Search..." id="mkdocs-search-query" title="Type search term here">
+                    </div>
+                </form>
+                <div id="mkdocs-search-results" data-no-results-text="No results found"></div>
+            </div>
+            <div class="modal-footer">
+            </div>
+        </div>
+    </div>
+</div><div class="modal" id="mkdocs_keyboard_modal" tabindex="-1" role="dialog" aria-labelledby="keyboardModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4 class="modal-title" id="keyboardModalLabel">Keyboard Shortcuts</h4>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th style="width: 20%;">Keys</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td class="help shortcut"><kbd>?</kbd></td>
+                    <td>Open this help</td>
+                  </tr>
+                  <tr>
+                    <td class="next shortcut"><kbd>n</kbd></td>
+                    <td>Next page</td>
+                  </tr>
+                  <tr>
+                    <td class="prev shortcut"><kbd>p</kbd></td>
+                    <td>Previous page</td>
+                  </tr>
+                  <tr>
+                    <td class="search shortcut"><kbd>s</kbd></td>
+                    <td>Search</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="modal-footer">
+            </div>
+        </div>
+    </div>
+</div>
+
+    </body>
+</html>
