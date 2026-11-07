@@ -65,26 +65,6 @@ If the demo succeeds, it prints:
 Result verified successfully against NumPy!
 ```
 
-### Roofline demo
-
-`demos/roofline.py` runs every `benchmarks/*_bench.py` in its own process, measures this machine's peak GFLOP/s and memory bandwidth, and draws one class roofline marking each kernel memory-bound or compute-bound. Bytes moved are estimated per kernel (no hardware counters), so the chart shows where each kernel sits rather than an exact measurement.
-
-```bash
-python demos/roofline.py                                   # every benchmark
-python demos/roofline.py benchmarks/matmul_numba_bench.py  # one kernel, detailed chart
-python demos/roofline.py --plot-only --html                # redraw from saved results
-python demos/roofline.py --help                            # all options, with examples
-```
-
-Charts, `results.json` and a summary table are written to `demos/roofline_output/`. On the cluster it can be added to `run_bench.sh` as:
-
-```bash
-python3 $(pwd)/demos/roofline.py
-```
-
-A bench file can optionally define `roofline_bytes(name, n)` to return the bytes a baseline moves at size `n` (or `None` for the built-in estimate).
-
-
 ## Quick usage example
 
 You can also import the package directly in your own code:
