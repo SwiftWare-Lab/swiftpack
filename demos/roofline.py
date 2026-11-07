@@ -1,33 +1,24 @@
 """
-Class roofline for the ECE 752 SwiftPack benchmarks.
+Roofline calculator: where does a computation sit on this machine's roofline?
 
-Runs every benchmarks/*_bench.py in its own subprocess, measures this machine's
-roofs (peak GFLOP/s and memory bandwidth), and draws one class roofline that
-marks each kernel memory-bound or compute-bound.
+Give it a computation: its FLOPs, the bytes it moves and its run time, or a
+Python function to time. It measures this machine's roofs once (peak GFLOP/s
+and memory bandwidth, cached in machine.json), places the computation under
+them, marks it memory-bound or compute-bound, and writes one chart (PNG) and
+one table (CSV).
 
-    python demos/roofline.py                                   # whole class
-    python demos/roofline.py benchmarks/gemver_numba_bench.py  # one student, detailed chart
-    python demos/roofline.py --n 4096                          # same N for every kernel
-    python demos/roofline.py --n gemver=4096 --n 2mm=256       # per-kernel N
-    python demos/roofline.py --plot-only --all --html          # redraw from saved results
-    python demos/roofline.py --peak-gflops 72.8 --bandwidth 37.2 --plot-only
+    python demos/roofline.py --name my_kernel --flops 1.68e8 --bytes 4.03e8 --time 0.0135
+    python demos/roofline.py --example
+    python demos/roofline.py --help
 
-Output goes to demos/roofline_output/ (change with --out). Only the standard
-library, numpy, numba and matplotlib are used.
-
-# Optional: make your dots more precise
-# - Add roofline_bytes(name, n) to your bench file.
-# - Return how many bytes that baseline moves at size n (e.g. fused
-#   versions that read a matrix fewer times move fewer bytes).
-# - Return None to use the built-in estimate. Without the function the
-#   built-in estimate is used for every baseline.
+From Python: analyze_point(), measure(), plot_roofline() and write_csv().
+How every number is calculated: README.md in this folder.
+Only the standard library, numpy, numba and matplotlib are used.
 """
 
 import argparse
-import ast
+import csv
 import datetime
-import importlib.util
-import inspect
 import json
 import math
 import os
@@ -38,330 +29,21 @@ import subprocess
 import sys
 import tempfile
 import time
-import traceback
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
-DEFAULT_OUT = REPO / "demos" / "roofline_output"
-
-# Library thread pins for every worker
-# - Must be set before Python starts: setting them after `import numpy` has no effect.
-# - They do not limit Numba's own threads (gemver sets the same and still runs 24).
-BLAS_ENV = ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS",
-            "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")
-
-
-# ---------------------------------------------------------
-# Kernel table
-# - One entry per PolyBench kernel; adding a kernel is one entry.
-# - All dimensions are N unless the entry says otherwise, 8 bytes per double.
-# - Formulas are f(n, g): g holds module globals saved by the worker
-#   (heat3d's `steps`, syrk's `K`), so --plot-only needs no module.
-# - flops is only for a sanity warning; the plotted FLOPs are the student's own.
-# - bytes assume perfect cache reuse (what a well-blocked version achieves).
-# - ws = working set, used to pick the L3 or DRAM roof.
-# - Default N: measured on a Ryzen 9 5900X (24 threads), whole class in 767 s:
-#   gemver 4096: 117 s, matmul 512: 70 s, 2mm 512: 153 s, heat3d 128: 100 s,
-#   correlation 512: 119 s, atax 4096: 138 s, syrk 512: 47 s, roofs: 11 s.
-#   (atax 8192 removes its cache reuse, 86% of roof instead of 126%, but takes 532 s.)
-# ---------------------------------------------------------
-def _g(g, name, default):
-    try:
-        return float(g[name])
-    except (KeyError, TypeError, ValueError):
-        return float(default)
-
-
-def _call_syrk(mod, n):
-    # - Old syrk: run_benchmark(matrix_size=(N, K)).
-    # - refactor_syrk: run_benchmark(matrix_size, alpha, beta, trans, uplo),
-    #   all required; values are the defaults from its __main__.
-    params = _required_params(mod.run_benchmark)
-    if len(params) >= 5:
-        return mod.run_benchmark((n, n // 2), 1.25, -0.4, "N", "U")
-    return mod.run_benchmark((n, n // 2))
-
-
-KERNELS = {
-    "matmul": dict(label="MATMUL", student="Professor", aliases=["gemm"], n=512,
-                   flops=lambda n, g: 2 * n**3,
-                   bytes=lambda n, g: 32 * n**2,      # read A, B; read and write C
-                   ws=lambda n, g: 24 * n**2),
-    "gemver": dict(label="GEMVER", student="Bart", aliases=[], n=4096,
-                   flops=lambda n, g: 10 * n**2 + n,
-                   bytes=lambda n, g: 24 * n**2,      # 3 passes over A; the hook refines this
-                   ws=lambda n, g: 8 * n**2),
-    "2mm": dict(label="2MM", student="Yue", aliases=["_2mm", "twomm"], n=512,
-                flops=lambda n, g: 4 * n**3 + 2 * n**2,
-                bytes=lambda n, g: 56 * n**2,         # A, B, C; tmp written and re-read; D read and written
-                ws=lambda n, g: 40 * n**2),
-    "heat3d": dict(label="HEAT-3D", student="Nolan", aliases=["heat_3d", "heat-3d"], n=128,
-                   flops=lambda n, g: 13 * _g(g, "steps", 20) * n**3,
-                   # - each sweep reads one grid and writes the other
-                   # - T_next is only written, so the CPU first reads each line for
-                   #   ownership (write-allocate): 8 + 8 + 8 = 24 bytes per point
-                   bytes=lambda n, g: 24 * _g(g, "steps", 20) * n**3,
-                   ws=lambda n, g: 16 * n**3),
-    # traffic="read": A is only read, so it is judged against the read-only DRAM roof
-    "atax": dict(label="ATAX", student="Ethan", aliases=[], n=4096, traffic="read",
-                 flops=lambda n, g: 4 * n**2,
-                 bytes=lambda n, g: 8 * n**2,         # A read once (split versions read it twice)
-                 ws=lambda n, g: 8 * n**2),
-    "syrk": dict(label="SYRK", student="Junwei", aliases=[], n=512, call=_call_syrk,
-                 flops=lambda n, g: n**2 * _g(g, "K", n // 2),
-                 bytes=lambda n, g: 8 * n * _g(g, "K", n // 2) + 8 * n**2,   # A (N x K); half of C read and written
-                 ws=lambda n, g: 8 * n * _g(g, "K", n // 2) + 8 * n**2),
-    "syr2k": dict(label="SYR2K", student="Hammad", aliases=[], n=512,
-                  flops=lambda n, g: 2 * n**3,
-                  bytes=lambda n, g: 24 * n**2,       # A, B; lower half of C read and written
-                  ws=lambda n, g: 24 * n**2),
-    "correlation": dict(label="CORRELATION", student="Dima", aliases=["corr"], n=512,
-                        flops=lambda n, g: n**3,
-                        bytes=lambda n, g: 24 * n**2,  # data read and written; corr written
-                        ws=lambda n, g: 16 * n**2),
-    "floyd_warshall": dict(label="FLOYD-WARSHALL", student="Malko-Bani",
-                           aliases=["floydwarshall", "fw"], n=512, unit="OP",
-                           flops=lambda n, g: 2 * n**3,  # add + compare, counted as operations
-                           bytes=lambda n, g: 16 * n**3,  # the path matrix streams once per k step
-                           ws=lambda n, g: 8 * n**2),
-}
-
+HERE = Path(__file__).resolve().parent
+DEFAULT_OUT = HERE / "roofline_output"
 LEVEL_NAMES = {"dram": "DRAM", "dram_read": "DRAM read-only", "l3": "L3"}
-
-# Numba falls back to its simple 'workqueue' layer when neither OpenMP nor TBB is installed
-# - Seen on a fresh Ubuntu (WSL): nested prange baselines (correlation, syrk) ran past 900 s.
-WORKQUEUE_NOTE = ("Numba ran on its 'workqueue' threading layer (no OpenMP or TBB found), so parallel "
-                  "baselines are slower than usual; on Linux, installing libgomp1 enables OpenMP.")
-
-PAR_RE = re.compile(r"(^|_)par(allel)?(_|$)", re.IGNORECASE)
-FAMILY_RE = re.compile(r"^v?(\d+)_")
-
-
-def _norm(s):
-    return s.lower().replace("-", "").replace("_", "")
-
-
-def kernel_key(path):
-    """File name minus _numba_bench.py / _bench.py, matched against keys and aliases."""
-    stem = Path(path).name
-    for suffix in ("_numba_bench.py", "_bench.py", ".py"):
-        if stem.endswith(suffix):
-            stem = stem[: -len(suffix)]
-            break
-    want = _norm(stem)
-    for key, entry in KERNELS.items():
-        if want == _norm(key) or want in (_norm(a) for a in entry["aliases"]):
-            return key
-    return stem.lower()
-
-
-def family(name):
-    m = FAMILY_RE.match(name)
-    return int(m.group(1)) if m else None
-
-
-# ---------------------------------------------------------
-# Worker: runs one bench file inside its own subprocess
-# ---------------------------------------------------------
-def _required_params(fn):
-    sig = inspect.signature(fn)
-    return [p for p in sig.parameters.values()
-            if p.default is p.empty and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
-
-
-def call_run_benchmark(mod, key, n):
-    """Call run_benchmark with the argument shape this file expects."""
-    entry = KERNELS.get(key, {})
-    if entry.get("call"):
-        return entry["call"](mod, n)
-    run = mod.run_benchmark
-    params = [p for p in inspect.signature(run).parameters.values()
-              if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
-    required = [p for p in params if p.default is p.empty]
-    if len(required) == 1:
-        return run(n)
-    if len(required) == 2:
-        return run(n, n)                       # e.g. atax: run_benchmark(M_input, N_input)
-    if not required and params:
-        default = params[0].default
-        if isinstance(default, tuple) and len(default) == 2:
-            return run((n, n // 2))
-        return run(n)
-    raise TypeError(f"cannot call run_benchmark{inspect.signature(run)}; "
-                    f"add a 'call' entry for '{key}' in the kernel table")
-
-
-def _add_pairs(found, value):
-    """Add (str, callable) pairs from a list to the name -> function map."""
-    if not isinstance(value, (list, tuple)):
-        return
-    for item in value:
-        if (isinstance(item, (list, tuple)) and len(item) >= 2
-                and isinstance(item[0], str) and callable(item[1])):
-            found.setdefault(item[0], item[1])
-
-
-def _resolve(mod, node):
-    if isinstance(node, ast.Name):
-        return getattr(mod, node.id, None)
-    if isinstance(node, ast.Attribute):
-        base = _resolve(mod, node.value)
-        return getattr(base, node.attr, None) if base is not None else None
-    return None
-
-
-def baseline_functions(mod, source):
-    """
-    Map each baseline name to its function, in this order:
-    - a literal `functions = [("name", fn), ...]` inside run_benchmark
-    - `functions = some_global_list`
-    - any module-level list of (str, callable) pairs (refactor_syrk's FUNCTIONS)
-    """
-    found = {}
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        tree = None
-    run = None
-    if tree is not None:
-        run = next((node for node in tree.body
-                    if isinstance(node, ast.FunctionDef) and node.name == "run_benchmark"), None)
-    if run is not None:
-        for node in ast.walk(run):
-            if not (isinstance(node, ast.Assign)
-                    and any(isinstance(t, ast.Name) and t.id == "functions" for t in node.targets)):
-                continue
-            value = node.value
-            if isinstance(value, (ast.List, ast.Tuple)):
-                for elt in value.elts:
-                    if (isinstance(elt, (ast.Tuple, ast.List)) and len(elt.elts) >= 2
-                            and isinstance(elt.elts[0], ast.Constant)
-                            and isinstance(elt.elts[0].value, str)):
-                        fn = _resolve(mod, elt.elts[1])
-                        if callable(fn):
-                            found.setdefault(elt.elts[0].value, fn)
-            elif isinstance(value, ast.Name):
-                _add_pairs(found, getattr(mod, value.id, None))
-    for value in list(vars(mod).values()):
-        _add_pairs(found, value)
-    return found
-
-
-def classify(name, fn):
-    """(is_numba, parallel, python) for one baseline."""
-    is_numba = fn is not None and hasattr(fn, "targetoptions")
-    if fn is not None:
-        # - Numba: parallel only if compiled with parallel=True.
-        # - NumPy / SciPy / pure Python run serial (the worker pins BLAS to 1 thread).
-        parallel = bool(is_numba and fn.targetoptions.get("parallel"))
-    else:
-        parallel = bool(PAR_RE.search(name))
-    python = (not is_numba) and "python" in name.lower()
-    return is_numba, parallel, python
-
-
-def _coerce_rows(raw, warnings):
-    rows = []
-    for item in raw or []:
-        if not isinstance(item, (list, tuple)) or len(item) < 3:
-            warnings.append(f"ignored a result row of unexpected shape: {item!r}"[:200])
-            continue
-        name = str(item[0])
-        try:
-            gflops, elapsed = float(item[1]), float(item[2])
-        except (TypeError, ValueError):
-            warnings.append(f"{name}: non-numeric gflops/elapsed, row dropped")
-            continue
-        if not (math.isfinite(gflops) and math.isfinite(elapsed)) or gflops <= 0 or elapsed <= 0:
-            warnings.append(f"{name}: gflops={gflops:g}, elapsed={elapsed:g}, row dropped")
-            continue
-        if len(item) >= 4:
-            correct = bool(item[3])
-        else:
-            correct = True
-            warnings.append(f"{name}: no is_correct field, treated as correct")
-        rows.append(dict(name=name, gflops=gflops, elapsed=elapsed, correct=correct))
-    return rows
-
-
-def worker_main(args):
-    path = Path(args._worker).resolve()
-    key = kernel_key(path)
-    n = int(args.n[0])
-    result = dict(kernel=key, file=str(path), n=n, started=_now(), warnings=[])
-    t0 = time.perf_counter()
-    try:
-        sys.path[:0] = [str(path.parent), str(REPO / "src")]
-        source = path.read_text(encoding="utf-8", errors="replace")
-        mod_name = "bench_" + re.sub(r"\W", "_", key)
-        spec = importlib.util.spec_from_file_location(mod_name, str(path))
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[mod_name] = mod
-        try:
-            spec.loader.exec_module(mod)
-        except BaseException as exc:
-            raise RuntimeError(f"import failed: {type(exc).__name__}: {exc}") from exc
-        if not callable(getattr(mod, "run_benchmark", None)):
-            raise RuntimeError("no run_benchmark() in this file")
-
-        raw = call_run_benchmark(mod, key, n)
-        rows = _coerce_rows(raw, result["warnings"])
-
-        fns = baseline_functions(mod, source)
-        hook = getattr(mod, "roofline_bytes", None)
-        hook_warned = False
-        for row in rows:
-            fn = fns.get(row["name"]) or getattr(mod, row["name"], None)
-            fn = fn if callable(fn) else None
-            row["numba"], row["parallel"], row["python"] = classify(row["name"], fn)
-            row["mapped"] = fn is not None
-            row["hook_bytes"] = None
-            if callable(hook):
-                try:
-                    value = hook(row["name"], n)
-                    if value is not None:
-                        value = float(value)
-                        if not math.isfinite(value) or value <= 0:
-                            raise ValueError(f"returned {value}")
-                        row["hook_bytes"] = value
-                except Exception as exc:
-                    if not hook_warned:
-                        result["warnings"].append(f"roofline_bytes() failed ({exc}); using the table")
-                        hook_warned = True
-        unmapped = [r["name"] for r in rows if not r["mapped"] and not r["python"]]
-        if unmapped:
-            result["warnings"].append("serial/parallel guessed from the name for: " + ", ".join(unmapped))
-        result["rows"] = rows
-        result["has_hook"] = callable(hook)
-        # Module globals the byte formulas may need (heat3d `steps`, syrk `K`)
-        result["globals"] = {k: v for k, v in vars(mod).items()
-                             if not k.startswith("_") and type(v) in (int, float)}
-        try:
-            import numba
-            result["numba_threads"] = int(numba.get_num_threads())
-            try:
-                result["threading_layer"] = str(numba.threading_layer())
-            except Exception:
-                result["threading_layer"] = None   # raises until a parallel region has run
-        except Exception:
-            pass
-    except BaseException as exc:
-        msg = str(exc) if isinstance(exc, RuntimeError) else f"{type(exc).__name__}: {exc}"
-        result["error"] = msg.strip().splitlines()[0][:300] if msg.strip() else type(exc).__name__
-        traceback.print_exc()
-    result["wall_s"] = time.perf_counter() - t0
-    _write_json(Path(args.json), result)
-    return 0
 
 
 # ---------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------
-def _now():
+def now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
-def _write_json(path, data):
+def write_json(path, data):
     # - Temp file + os.replace: a crash never leaves a half-written file.
     # - os.rename fails on Windows when the target exists; os.replace does not.
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -371,7 +53,7 @@ def _write_json(path, data):
     os.replace(tmp, path)
 
 
-def _read_json(path, default):
+def read_json(path, default):
     try:
         with open(path, encoding="utf-8") as fh:
             return json.load(fh)
@@ -388,7 +70,7 @@ def _run_cmd(cmd, timeout=5):
         return ""
 
 
-def _fmt(x):
+def fmt(x):
     """Short number for labels: 485, 34.6, 1.93, 0.42."""
     if x is None or not math.isfinite(x):
         return "?"
@@ -399,6 +81,15 @@ def _fmt(x):
     if x >= 1:
         return f"{x:.2f}"
     return f"{x:.2g}"
+
+
+def ensure_out(out):
+    """Create the output folder. It ignores itself, so `git status` stays clean."""
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    if not (out / ".gitignore").exists():
+        (out / ".gitignore").write_text("# written by demos/roofline.py\n*\n", encoding="utf-8")
+    return out
 
 
 # ---------------------------------------------------------
@@ -527,9 +218,18 @@ def _peak_kernels():
     from numba import njit, prange
     import numpy as np
 
-    # - 8 chained x = x*a + b per element per pass = 8 FMAs = 16 FLOPs.
+    # Peak FLOP/s micro-benchmark
+    # - Same idea as the FLOP kernel of the Empirical Roofline Toolkit (ERT): a chain of
+    #   FMAs on each element of a small array, stored back (ERT: beta = beta*A[i] + alpha).
+    #   Lo et al., "Roofline Model Toolkit", PMBS 2014, doi:10.1007/978-3-319-17248-4_7.
+    #   Code: https://bitbucket.org/berkeleylab/cs-roofline-toolkit
+    # - 8 chained x = x*a + b per element per pass = 8 FMAs = 16 FLOPs (ERT_FLOP=16).
+    # - 8 was the best count on a Ryzen 9 5900X (92% of theoretical; 4 -> 69%, 16 -> 74%):
+    #   with fewer, loading and storing x[i] limits the loop; with more, the chains get
+    #   too long to hide the FMA latency. Details in README.md (this folder).
     # - a and b MUST be arguments: as literals, fastmath folds the chain and the
-    #   5900X reported an impossible 194.6 GFLOP/s (266% of theoretical).
+    #   5900X reported an impossible 170-195 GFLOP/s (over 230% of theoretical).
+    # - x settles at b / (1 - a) = 0.1: no overflow, no slow denormal numbers.
     # - 256 doubles stay in L1; returning a checksum keeps the work alive.
     @njit(fastmath=True)
     def peak_serial(x, a, b, passes):
@@ -583,36 +283,38 @@ def _peak_kernels():
 def _stream_kernels():
     from numba import njit, prange
 
-    # Bart's measure_bandwidth() kernel (benchmarks/gemver_numba_bench.py)
-    # - a = a + s*b: read a, read b, write a = 24 bytes per element.
-    # - a is read before it is written, so there is no hidden write-allocate traffic.
+    # Memory bandwidth micro-benchmarks: the DAXPY and SUM kernels of McCalpin's STREAM2
+    # - https://www.cs.virginia.edu/stream/stream2/ (STREAM: https://www.cs.virginia.edu/stream/)
+    # - DAXPY a = a + s*b: read a, read b, write a = 24 bytes per element.
+    # - a is read before it is written, so there is no hidden write-allocate traffic
+    #   (STREAM's Triad writes a third array, which the CPU first reads for ownership).
     @njit(fastmath=True)
-    def triad_serial(a, b, s):
+    def daxpy_serial(a, b, s):
         for i in range(a.shape[0]):
             a[i] = a[i] + s * b[i]
 
     @njit(parallel=True, fastmath=True)
-    def triad_parallel(a, b, s):
+    def daxpy_parallel(a, b, s):
         for i in prange(a.shape[0]):
             a[i] = a[i] + s * b[i]
 
-    # Read-only stream: s += a[i] (8 bytes per element, nothing written)
-    # - Kernels that only read their big array (atax) can beat the read + write roof.
+    # - SUM t += a[i]: read only, 8 bytes per element, nothing written.
+    # - Kernels that only read their big array can beat the read + write roof.
     @njit(fastmath=True)
-    def read_serial(a, b, s):
+    def sum_serial(a, b, s):
         t = 0.0
         for i in range(a.shape[0]):
             t += a[i]
         return t
 
     @njit(parallel=True, fastmath=True)
-    def read_parallel(a, b, s):
+    def sum_parallel(a, b, s):
         t = 0.0
         for i in prange(a.shape[0]):
             t += a[i]
         return t
 
-    return triad_serial, triad_parallel, read_serial, read_parallel
+    return daxpy_serial, daxpy_parallel, sum_serial, sum_parallel
 
 
 def _best_gbps(fn, a, b, min_time=0.0, reps=10, bytes_per_elem=24.0):
@@ -668,15 +370,15 @@ def measure_machine(info, l3_instance_mb, log=print):
     log(f"  peak: {m['peak_1']:.1f} GFLOP/s 1 core, {m['peak_all']:.1f} all cores")
 
     # DRAM bandwidth: arrays far larger than L3
-    triad_serial, triad_parallel, read_serial, read_parallel = _stream_kernels()
+    daxpy_serial, daxpy_parallel, sum_serial, sum_parallel = _stream_kernels()
     l3_total = (info.get("l3_total_mb") or 32.0) * 2**20
     n = int(max(128 * 2**20, 4 * l3_total) // 8)
     big_a, big_b = np.ones(n), np.ones(n)
-    m["dram_1"] = _best_gbps(triad_serial, big_a, big_b)
+    m["dram_1"] = _best_gbps(daxpy_serial, big_a, big_b)
     by_threads = {}
     for t in _thread_counts(max_threads, physical):
         set_num_threads(t)
-        by_threads[t] = _best_gbps(triad_parallel, big_a, big_b)
+        by_threads[t] = _best_gbps(daxpy_parallel, big_a, big_b)
     set_num_threads(max_threads)
     # - The all-core roof is the best thread count, not always the most threads:
     #   on the 5900X 24 threads got LESS than 1 (27.6 vs 37.2 GB/s).
@@ -684,11 +386,11 @@ def measure_machine(info, l3_instance_mb, log=print):
     m["dram_all"] = max(max(by_threads.values()), m["dram_1"])
     log(f"  DRAM: {m['dram_1']:.1f} GB/s 1 core, {m['dram_all']:.1f} best of "
         + ", ".join(f"{k} thr {v:.1f}" for k, v in by_threads.items()) + "  (read + write)")
-    m["dram_read_1"] = _best_gbps(read_serial, big_a, big_b, bytes_per_elem=8.0)
+    m["dram_read_1"] = _best_gbps(sum_serial, big_a, big_b, bytes_per_elem=8.0)
     read_by = {}
     for t in _thread_counts(max_threads, physical):
         set_num_threads(t)
-        read_by[t] = _best_gbps(read_parallel, big_a, big_b, bytes_per_elem=8.0)
+        read_by[t] = _best_gbps(sum_parallel, big_a, big_b, bytes_per_elem=8.0)
     set_num_threads(max_threads)
     m["dram_read_by_threads"] = {str(k): v for k, v in read_by.items()}
     m["dram_read_all"] = max(max(read_by.values()), m["dram_read_1"])
@@ -699,8 +401,8 @@ def measure_machine(info, l3_instance_mb, log=print):
     # L3 bandwidth: both arrays together fill about half of one L3 instance
     n = int(l3_instance_mb * 2**20 / 4 // 8)
     small_a, small_b = np.ones(n), np.ones(n)
-    m["l3_1"] = _best_gbps(triad_serial, small_a, small_b, min_time=0.2)
-    m["l3_all"] = max(_best_gbps(triad_parallel, small_a, small_b, min_time=0.2), m["l3_1"])
+    m["l3_1"] = _best_gbps(daxpy_serial, small_a, small_b, min_time=0.2)
+    m["l3_all"] = max(_best_gbps(daxpy_parallel, small_a, small_b, min_time=0.2), m["l3_1"])
     log(f"  L3:   {m['l3_1']:.1f} GB/s 1 core, {m['l3_all']:.1f} all cores "
         f"(2 x {n * 8 / 2**20:.1f} MiB arrays)")
     m["numba_threads"] = max_threads
@@ -713,11 +415,16 @@ def _timed(fn, *args):
     return time.perf_counter() - t
 
 
-def load_machine(out, args, need_measure, log=print):
-    """Return the machine profile, measuring it if needed and allowed."""
-    path = out / "machine.json"
-    saved = _read_json(path, None)
-    if not need_measure:
+def load_machine(out_dir=DEFAULT_OUT, remeasure=False, l3_mb=None, cached_only=False, log=print):
+    """
+    This machine's profile: CPU details plus the measured roofs.
+    - Cached in out_dir/machine.json; measured again for a new machine or remeasure=True.
+    - l3_mb: L3 size of one instance (Windows only reports the chip total).
+    - cached_only=True: just read the saved profile (None if there is none).
+    """
+    path = Path(out_dir) / "machine.json"
+    saved = read_json(path, None)
+    if cached_only:
         return saved
 
     info = detect_cpu()
@@ -738,7 +445,7 @@ def load_machine(out, args, need_measure, log=print):
                    theoretical={"1": theo_1, "all": theo_1 * info["physical_alloc"] if theo_1 else None})
 
     # L3 per instance (one CCD on AMD); --l3-mb wins, then a saved override
-    l3_user = args.l3_mb or (saved or {}).get("l3_mb_user")
+    l3_user = l3_mb or (saved or {}).get("l3_mb_user")
     if l3_user:
         profile["l3_mb_user"] = float(l3_user)
         profile["l3_instance_mb"] = float(l3_user)
@@ -752,11 +459,11 @@ def load_machine(out, args, need_measure, log=print):
 
     # reuse the cached roofs only if they come from this machine and have every field
     if (saved and saved.get("key") == key and (saved.get("measured") or {}).get("dram_read_all")
-            and not args.remeasure):
+            and not remeasure):
         profile["measured"] = saved["measured"]
         profile["measured_at"] = saved.get("measured_at")
         if profile != saved:
-            _write_json(path, profile)
+            write_json(path, profile)
         log(f"Machine: {profile['cpu']} (cached roofs from {profile.get('measured_at')}; --remeasure to redo)")
         return profile
 
@@ -777,32 +484,38 @@ def load_machine(out, args, need_measure, log=print):
             log(f"  warning: measured {c}-core peak is only {100 * measured[f'peak_{c}'] / theo:.0f}% "
                 "of theoretical.")
     profile["measured"] = measured
-    profile["measured_at"] = _now()
-    _write_json(path, profile)
+    profile["measured_at"] = now()
+    write_json(path, profile)
     return profile
 
 
-def _parse_pair(text):
-    """'72.8' -> (72.8, 72.8); '72.8,610' -> (72.8, 610.0)."""
-    parts = [float(p) for p in str(text).split(",") if p.strip()]
+def _parse_pair(value):
+    """'72.8' or 72.8 -> (72.8, 72.8); '72.8,610' or (72.8, 610) -> (72.8, 610.0)."""
+    if isinstance(value, (tuple, list)):
+        value = ",".join(str(v) for v in value)
+    parts = [float(p) for p in str(value).split(",") if p.strip()]
     if not parts:
-        raise ValueError(text)
+        raise ValueError(value)
     return parts[0], parts[1] if len(parts) > 1 else parts[0]
 
 
-def build_roofs(machine, args):
+def build_roofs(machine, peak_gflops=None, bandwidth=None, read_bandwidth=None, l3_bandwidth=None,
+                peak_source="measured"):
     """
-    Four roof sets: {1 core, all cores} x {DRAM, L3}.
-    - Measured values by default; --peak-source theoretical switches the peak.
-    - A single override value sets both the 1-core and the all-core roof.
+    Roof sets for 1 core and all cores: peak, DRAM (read + write), DRAM read-only, L3.
+    - Measured values by default; peak_source="theoretical" switches the peak.
+    - Overrides (GFLOP/s or GB/s): one value sets both the 1-core and the all-core
+      roof; "1core,allcores" or a pair sets them separately.
     """
     machine = machine or {}
     meas = machine.get("measured") or {}
     theo = machine.get("theoretical") or {}
+    overrides = dict(peak_gflops=peak_gflops, bandwidth=bandwidth, read_bandwidth=read_bandwidth,
+                     l3_bandwidth=l3_bandwidth)
     roofs = {}
     for c in ("1", "all"):
         peak, src = meas.get(f"peak_{c}"), "measured"
-        if args.peak_source == "theoretical" or not peak:
+        if peak_source == "theoretical" or not peak:
             peak, src = theo.get(c), "theoretical"
         roofs[c] = dict(peak=peak, peak_src=src, theo=theo.get(c),
                         dram=meas.get(f"dram_{c}"), dram_src="measured",
@@ -810,7 +523,7 @@ def build_roofs(machine, args):
                         l3=meas.get(f"l3_{c}"), l3_src="measured")
     for flag, field in (("peak_gflops", "peak"), ("bandwidth", "dram"), ("read_bandwidth", "dram_read"),
                         ("l3_bandwidth", "l3")):
-        value = getattr(args, flag, None)
+        value = overrides[flag]
         if value:
             one, allc = _parse_pair(value)
             roofs["1"][field], roofs["all"][field] = one, allc
@@ -830,379 +543,145 @@ def build_roofs(machine, args):
     return roofs
 
 
-# ---------------------------------------------------------
-# Metrics and verdict
-# ---------------------------------------------------------
-# Why the student's own FLOP count
-# - F = GFLOP/s x time, so every dot keeps the GFLOP/s from the student's slides.
-# - Under the memory roof the count cancels: P / (beta x AI) = B / (time x beta),
-#   so "memory-bound" and "% of roof" depend only on bytes and time.
-def analyze(run, roofs, ai_override=None):
-    """Turn one kernel's raw rows into roofline points plus a summary row."""
-    key, n = run["kernel"], run["n"]
-    entry = KERNELS.get(key)
-    g = run.get("globals") or {}
-    warnings = list(run.get("warnings") or [])
-    unit = (entry or {}).get("unit", "FLOP")
-    pts = []
-    for row in run.get("rows", []):
-        F = row["gflops"] * row["elapsed"] * 1e9
-        if ai_override:
-            B, src = F / ai_override, "user"
-        elif row.get("hook_bytes"):
-            B, src = row["hook_bytes"], "hook"
-        elif entry:
-            B, src = float(entry["bytes"](n, g)), "table"
-        else:
-            B, src = None, None
-        pts.append(dict(row, F=F, B=B, bytes_src=src, family=family(row["name"]),
-                        P=row["gflops"]))
+def roof_overrides(args):
+    """The flags from add_machine_args() as keywords for build_roofs()."""
+    return dict(peak_gflops=args.peak_gflops, bandwidth=args.bandwidth,
+                read_bandwidth=args.read_bandwidth, l3_bandwidth=args.l3_bandwidth,
+                peak_source=args.peak_source)
 
-    numba_rows = [p for p in pts if not p["python"]]
-    start = (next((p for p in numba_rows if p["family"] == 1), None)
-             or next((p for p in numba_rows if p.get("numba")), None)
-             or (numba_rows[0] if numba_rows else None))
-    if start is None or start["B"] is None:
-        return dict(kernel=key, n=n, run=run, points=pts, start=None, best=None, warnings=warnings,
-                    status="AI unknown, add a table entry or roofline_bytes()" if start else "no compiled baselines")
 
-    ws = float(entry["ws"](n, g)) if entry else None
-    # L3 roof only if the working set fits comfortably in the L3 the baseline can use
+def add_machine_args(parser):
+    """Machine flags shared by every command line; returns the group so a caller can add more."""
+    machine = parser.add_argument_group("machine numbers (measured automatically; override if needed)")
+    machine.add_argument("--remeasure", action="store_true", help="measure the roofs again")
+    machine.add_argument("--peak-gflops", metavar="GFLOPS[,ALL]",
+                         help="peak GFLOP/s: 1 core, or 1 core,all cores")
+    machine.add_argument("--bandwidth", metavar="GBS[,ALL]", help="DRAM GB/s, read + write")
+    machine.add_argument("--read-bandwidth", metavar="GBS[,ALL]", help="DRAM GB/s, read only")
+    machine.add_argument("--l3-bandwidth", metavar="GBS[,ALL]", help="L3 GB/s")
+    machine.add_argument("--l3-mb", type=float, metavar="MB",
+                         help="L3 size of one instance (e.g. 32 per CCD on a Ryzen 5900X)")
+    machine.add_argument("--peak-source", choices=["measured", "theoretical"], default="measured",
+                         help="which peak to use as the roof (default: measured)")
+    return machine
+
+
+def machine_line(machine, layers=(), extra=()):
+    """One line for a chart subtitle: CPU · cores / threads · Numba threads · date."""
+    m = machine or {}
+    nt = (m.get("measured") or {}).get("numba_threads")
+    parts = [m.get("cpu", "unknown CPU")]
+    if m.get("physical_alloc"):
+        parts.append(f"{m['physical_alloc']} cores / {m.get('allocated_cpus')} threads")
+    if nt:
+        parts.append(f"Numba threads {nt}" + (f" ({', '.join(layers)})" if layers else ""))
+    parts.append(datetime.date.today().isoformat())
+    return " · ".join(parts + list(extra))
+
+
+def roof_source_note(roofs):
+    """Footnote: where the roof numbers come from."""
+    srcs = {roofs[c][f] for c in ("1", "all") for f in ("peak_src", "dram_src")}
+    return "Peak and bandwidth " + ("set by the user (user)." if srcs == {"user"} else
+                                    "measured on this machine." if "user" not in srcs else
+                                    "measured on this machine; values marked (user) were given.")
+
+
+# ---------------------------------------------------------
+# Roofline math for one computation
+# - P = performance (GFLOP/s), AI = arithmetic intensity (FLOP per byte moved).
+# - Roof(AI) = min(peak, bandwidth x AI); ridge = peak / bandwidth.
+# - Left of the ridge the bandwidth roof is lower: memory-bound. Right: compute-bound.
+# - Under the memory roof the FLOP count cancels: P / (bandwidth x AI) =
+#   bytes / (time x bandwidth), so "% of roof" there depends only on bytes and time.
+# ---------------------------------------------------------
+def verdict(bound, pct, far):
+    """The bound, plus a note when the point is far below or above its roof."""
+    text = bound + (", far below the roof (locality or overhead)" if far else "")
+    if pct > 1.0:
+        # e.g. an array only ~2x the L3: repeated runs still find part of it in cache
+        text += ", above the roof (some data reused from cache)"
+    return text
+
+
+def analyze_point(name, roofs, flops=None, bytes_moved=None, seconds=None, gflops=None, ai=None,
+                  parallel=False, working_set=None, read_only=False, unit="FLOP"):
+    """
+    Roofline numbers for one computation (one baseline).
+    - Performance: gflops, or flops / seconds.
+    - Arithmetic intensity: ai, or flops / bytes_moved.
+    - parallel=True uses the all-core roofs; working_set (bytes) uses the L3 roof
+      when the data fits in L3; read_only=True uses the read-only DRAM roof.
+    Returns a dict: P, AI, roof, ridge, pct (fraction of the roof), bound, verdict, ...
+    """
+    if gflops is None:
+        if not (flops and seconds):
+            raise ValueError(f"{name}: give gflops, or flops and seconds")
+        gflops = flops / seconds / 1e9
+    if ai is None:
+        if not (flops and bytes_moved):
+            raise ValueError(f"{name}: give ai, or flops and bytes moved")
+        ai = flops / bytes_moved
+    P, AI = float(gflops), float(ai)
+    if not (P > 0 and AI > 0):
+        raise ValueError(f"{name}: performance and arithmetic intensity must be positive")
+    cores = "all" if parallel else "1"
+    # L3 roof only if the working set fits comfortably in the L3 the computation can use
     # - serial: one L3 instance (one CCD on AMD)
-    # - parallel: all instances (threads on both CCDs share the work)
+    # - parallel: all instances (threads on every CCD share the work)
     l3_one = roofs.get("l3_instance_mb")
     l3_all = max(roofs.get("l3_total_mb") or 0, l3_one or 0) or None
-    for p in pts:
-        # Python rows (capped at N=128 in some files) take the start row's AI
-        p["AI"] = start["F"] / start["B"] if p["python"] else p["F"] / p["B"]
-        cores = "all" if p["parallel"] else "1"
-        cap = l3_all if p["parallel"] else l3_one
-        level = "l3" if (ws is not None and cap and ws <= 0.8 * cap * 2**20) else "dram"
-        if level == "dram" and (entry or {}).get("traffic") == "read":
-            level = "dram_read"           # mostly-read kernels: read-only DRAM roof
-        lvl = level if roofs[cores].get(level) else "dram"
-        pi, beta = roofs[cores]["peak"], roofs[cores][lvl]
-        p["cores"], p["level"] = cores, lvl
-        p["roof"] = min(pi, beta * p["AI"])
-        p["ridge"] = pi / beta
-        p["pct"] = p["P"] / p["roof"]
-        p["bound"] = "Memory-bound" if p["AI"] < p["ridge"] else "Compute-bound"
-        p["far"] = p["pct"] < 0.10 or p["python"]
-        p["verdict"] = p["bound"] + (", far below the roof (locality or overhead)" if p["far"] else "")
-        if p["pct"] > 1.0:
-            # e.g. atax at N=4096: A (134 MB) is only 2x the L3, so repeated runs reuse part of it
-            p["verdict"] += ", above the roof (some data reused from cache)"
-        if entry and not p["python"]:
-            ref = float(entry["flops"](n, g))
-            ratio = p["F"] / ref if ref else 1.0
-            if not 0.5 <= ratio <= 2.0:
-                warnings.append(f"{p['name']}: FLOPs are {ratio:.2f}x the table's formula "
-                                "(are all dimensions N?)")
-
-    # Best: fastest correct row; a serial row within 1% wins, so noise does not pick the roof
-    correct = [p for p in pts if p["correct"] and not p["python"]]
-    best = None
-    if correct:
-        top = max(p["P"] for p in correct)
-        near = [p for p in correct if p["P"] >= 0.99 * top]
-        serial = [p for p in near if not p["parallel"]]
-        best = max(serial or near, key=lambda p: p["P"])
-    return dict(kernel=key, n=n, run=run, points=pts, start=start, best=best, unit=unit,
-                warnings=warnings, ws=ws, status="ok")
+    cap = l3_all if parallel else l3_one
+    level = "l3" if (working_set is not None and cap and working_set <= 0.8 * cap * 2**20) else "dram"
+    if level == "dram" and read_only:
+        level = "dram_read"           # only reads its big array: read-only DRAM roof
+    lvl = level if roofs[cores].get(level) else "dram"
+    pi, beta = roofs[cores]["peak"], roofs[cores][lvl]
+    roof = min(pi, beta * AI)
+    pct = P / roof
+    bound = "Memory-bound" if AI < pi / beta else "Compute-bound"
+    far = pct < 0.10
+    return dict(name=name, unit=unit, F=flops, B=bytes_moved, seconds=seconds, P=P, AI=AI,
+                parallel=bool(parallel), cores=cores, level=lvl, peak=pi, bw=beta, roof=roof,
+                ridge=pi / beta, pct=pct, bound=bound, far=far, verdict=verdict(bound, pct, far))
 
 
-def summary_row(res):
-    key = res["kernel"]
-    entry = KERNELS.get(key, {})
-    row = dict(kernel=entry.get("label", key.upper()), key=key, student=entry.get("student", "?"),
-               n=res["n"], status=res["status"])
-    start, best = res.get("start"), res.get("best")
-    if res["status"] != "ok":
-        return row
-    row.update(start_gflops=start["P"], unit=res["unit"])
-    if best:
-        cores = "all cores" if best["cores"] == "all" else "1 core"
-        row.update(best=best["name"], best_gflops=best["P"], speedup=best["P"] / start["P"],
-                   ai=best["AI"], roof_used=f"{LEVEL_NAMES[best['level']]}, {cores}",
-                   roof=best["roof"], pct=best["pct"], verdict=best["verdict"],
-                   bound=best["bound"], bytes_src=best["bytes_src"])
-    else:
-        row.update(best="(no correct baseline)", verdict="-", bytes_src=start["bytes_src"])
-    return row
-
-
-# ---------------------------------------------------------
-# Results cache
-# ---------------------------------------------------------
-def load_results(out):
-    data = _read_json(out / "results.json", None)
-    if not isinstance(data, dict):
-        data = {}
-    data.setdefault("version", 1)
-    data.setdefault("runs", [])
-    data.setdefault("skipped", [])
-    return data
-
-
-def merge_run(data, run):
-    """Replace the entry with the same (kernel, N, machine key); keep the rest."""
-    k = (run["kernel"], run["n"], run.get("machine_key"))
-    data["runs"] = [r for r in data["runs"] if (r["kernel"], r["n"], r.get("machine_key")) != k]
-    data["runs"].append(run)
-    data["skipped"] = [s for s in data["skipped"] if s["kernel"] != run["kernel"]]
-
-
-def merge_skip(data, skip):
-    data["skipped"] = [s for s in data["skipped"] if s["kernel"] != skip["kernel"]]
-    data["skipped"].append(skip)
-
-
-def select_runs(data, n_args, kernels=None):
-    """Newest run per kernel, unless --n picks an N."""
-    n_all, n_per = parse_n(n_args)
-    chosen = {}
-    for run in sorted(data["runs"], key=lambda r: r.get("started", "")):
-        key = run["kernel"]
-        if kernels and key not in kernels:
-            continue
-        want = n_per.get(key, n_all)
-        if want is not None and run["n"] != want:
-            continue
-        chosen[key] = run
-    order = list(KERNELS)
-    return sorted(chosen.values(), key=lambda r: (order.index(r["kernel"]) if r["kernel"] in order
-                                                  else len(order), r["kernel"]))
-
-
-def parse_n(n_args):
-    n_all, n_per = None, {}
-    for item in n_args or []:
-        if "=" in str(item):
-            k, v = str(item).split("=", 1)
-            n_per[kernel_key(k.strip() + "_bench.py")] = int(v)
-        else:
-            n_all = int(item)
-    return n_all, n_per
-
-
-# ---------------------------------------------------------
-# Runner
-# ---------------------------------------------------------
-def find_bench_files(paths):
-    files = []
-    for p in paths:
-        p = Path(p)
-        if p.is_dir():
-            files += sorted(p.glob("*_bench.py"))
-        elif p.is_file():
-            files.append(p)
-        else:
-            print(f"warning: {p} not found")
-    seen, unique = set(), []
-    for f in files:
-        r = f.resolve()
-        if r not in seen:
-            seen.add(r)
-            unique.append(r)
-    return unique
-
-
-def run_worker(path, key, n, timeout, out):
-    """Run one bench file in a fresh Python; returns (run dict or None, error or None)."""
-    env = dict(os.environ)
-    for var in BLAS_ENV:
-        env[var] = "1"
-    env["MPLBACKEND"] = "Agg"        # no window, works with no display
-    env["PYTHONUTF8"] = "1"          # Windows cp1252 crashes on characters like ≈ π β
-    extra = [str(Path(path).parent), str(REPO / "src")]
-    env["PYTHONPATH"] = os.pathsep.join(extra + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
-    logs = out / "logs"
-    logs.mkdir(parents=True, exist_ok=True)
-    log_path = logs / f"{key}_N{n}.log"
-    fd, tmp = tempfile.mkstemp(dir=str(out), prefix=f".{key}_", suffix=".json")
-    os.close(fd)
-    cmd = [sys.executable, str(Path(__file__).resolve()), "--_worker", str(path),
-           "--n", str(n), "--json", tmp]
-    try:
-        with open(log_path, "wb") as log:
-            try:
-                proc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env=env,
-                                      cwd=str(REPO), timeout=timeout)
-            except subprocess.TimeoutExpired:
-                return None, f"timed out after {timeout:.0f} s (see logs/{log_path.name})"
-        result = _read_json(Path(tmp), None)
-        if not result:
-            tail = log_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()
-            last = tail[-1][:200] if tail else f"exit code {proc.returncode}"
-            return None, f"worker crashed: {last} (see logs/{log_path.name})"
-        if result.get("error"):
-            return None, result["error"]
-        return result, None
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-
-
-def choose_n(key, n_args):
-    n_all, n_per = parse_n(n_args)
-    if key in n_per:
-        return n_per[key]
-    if n_all is not None:
-        return n_all
-    return KERNELS.get(key, {}).get("n", 512)
-
-
-# ---------------------------------------------------------
-# Rendering and reporting (charts are defined further down)
-# ---------------------------------------------------------
-def build_report(data, machine, args, kernels=None):
-    roofs = build_roofs(machine, args)
-    ai_force = {}
-    for item in args.ai or []:
-        k, v = item.split("=", 1)
-        ai_force[kernel_key(k.strip() + "_bench.py")] = float(v)
-    results = [analyze(run, roofs, ai_force.get(run["kernel"])) for run in select_runs(data, args.n, kernels)]
-    keys = {r["kernel"] for r in results}
-    skipped = [s for s in data["skipped"] if s["kernel"] not in keys
-               and (not kernels or s["kernel"] in kernels)]
-    mkeys = {r["run"].get("machine_key") for r in results} - {None}
-    notes = []
-    if len(mkeys) > 1:
-        notes.append("Results from different machines are mixed on this chart: " + "; ".join(sorted(mkeys)))
-    return dict(roofs=roofs, results=results, skipped=skipped, machine=machine or {}, notes=notes)
-
-
-def write_summary(report, out, args):
-    rows = [summary_row(r) for r in report["results"]]
-    lines = ["# Roofline summary", ""]
-    m = report["machine"]
-    roofs = report["roofs"]
-    lines.append(f"Machine: {m.get('cpu', 'unknown')} · {m.get('allocated_cpus', '?')} cpus · "
-                 f"{m.get('simd', '?')} · Numba threads {m.get('measured', {}).get('numba_threads', '?')}")
-    for c, label in (("1", "1 core"), ("all", "all cores")):
-        r = roofs[c]
-        lines.append(f"- {label}: peak {_fmt(r['peak'])} GFLOP/s ({r['peak_src']}), "
-                     f"DRAM {_fmt(r['dram'])} GB/s read + write ({r['dram_src']}), "
-                     f"{_fmt(r['dram_read'])} GB/s read-only ({r['dram_read_src']})"
-                     + (f", L3 {_fmt(r['l3'])} GB/s ({r['l3_src']})" if r.get("l3") else "")
-                     + (f", ridge {_fmt(r['peak'] / r['dram'])} FLOP/byte" if r['peak'] and r['dram'] else ""))
-    lines += ["", "| Kernel | Student | N | Start | Best baseline | Best | Speedup | AI | Roof used "
-              "| Roof | % of roof | Verdict | Bytes |",
-              "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
-    for row in rows:
-        if row["status"] != "ok":
-            lines.append(f"| {row['kernel']} | {row['student']} | {row['n']} | | {row['status']} "
-                         "| | | | | | | | |")
-            continue
-        u = "GOP/s" if row.get("unit") == "OP" else "GFLOP/s"
-        if row.get("best_gflops"):
-            lines.append(
-                f"| {row['kernel']} | {row['student']} | {row['n']} | {row['start_gflops']:.2f} {u} "
-                f"| {row['best']} | {row['best_gflops']:.2f} {u} | {row['speedup']:.1f}x "
-                f"| {row['ai']:.2f} | {row['roof_used']} | {row['roof']:.1f} | {100 * row['pct']:.0f}% "
-                f"| {row['verdict']} | {row['bytes_src']} |")
-        else:
-            lines.append(f"| {row['kernel']} | {row['student']} | {row['n']} | {row['start_gflops']:.2f} {u} "
-                         f"| {row['best']} | | | | | | | | {row['bytes_src']} |")
-    for s in report["skipped"]:
-        entry = KERNELS.get(s["kernel"], {})
-        lines.append(f"| {entry.get('label', s['kernel'].upper())} | {entry.get('student', '?')} "
-                     f"| {s.get('n', '')} | | skipped: {s['reason']} | | | | | | | | |")
-    lines.append("")
-    warn_lines = []
-    for r in report["results"]:
-        for w in r["warnings"]:
-            warn_lines.append(f"- {KERNELS.get(r['kernel'], {}).get('label', r['kernel'])}: {w}")
-    if warn_lines:
-        lines += ["Warnings:", ""] + warn_lines + [""]
-    lines += ["Notes:", ""] + [f"- {f}" for f in footnotes(report, args)] + [f"- {n}" for n in report["notes"]]
-    text = "\n".join(lines) + "\n"
-    tmp = out / "roofline_summary.md.tmp"
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, out / "roofline_summary.md")
-    return rows
-
-
-def footnotes(report, args):
-    notes = ["Bytes are an estimate: perfect cache reuse for the N^3 kernels, so naive versions "
-             "sit well below the roof (that gap is loop order and blocking)."]
-    if any(p.get("level") == "dram_read" for r in report["results"] for p in r["points"]):
-        notes.append("Kernels that only read their big array (ATAX) use the read-only DRAM roof (dash-dot); "
-                     "the others read and write, like Bart's a = a + s*b stream.")
-    if any(KERNELS.get(r["kernel"], {}).get("unit") == "OP" for r in report["results"]):
-        notes.append("Floyd-Warshall does integer/compare work; plotted as operations per second.")
-    if not args.include_python:
-        notes.append("Python baselines hidden (--include-python).")
-    notes.append("BLAS limited to 1 thread, so library baselines can read lower than students' own tables.")
-    if any(r["run"].get("threading_layer") == "workqueue" for r in report["results"]):
-        notes.append(WORKQUEUE_NOTE)
-    srcs = {report["roofs"][c][f] for c in ("1", "all") for f in ("peak_src", "dram_src")}
-    notes.append("Peak and bandwidth " + ("set by the user (user)." if srcs == {"user"} else
-                                          "measured on this machine." if "user" not in srcs else
-                                          "measured on this machine; values marked (user) were given."))
-    return notes
-
-
-def print_summary(rows, report):
-    print()
-    head = f"{'Kernel':<16} {'Student':<11} {'N':>6} {'Start':>8} {'Best':>8} {'Speedup':>8} " \
-           f"{'AI':>6} {'Roof':>8} {'%roof':>6}  {'Roof used':<17} Verdict / best baseline"
-    print(head)
-    print("-" * len(head))
-    for row in rows:
-        if row["status"] != "ok" or not row.get("best_gflops"):
-            print(f"{row['kernel']:<16} {row['student']:<11} {row['n']:>6}  {row.get('best', row['status'])}")
-            continue
-        print(f"{row['kernel']:<16} {row['student']:<11} {row['n']:>6} {row['start_gflops']:>8.2f} "
-              f"{row['best_gflops']:>8.2f} {row['speedup']:>7.1f}x {row['ai']:>6.2f} {row['roof']:>8.1f} "
-              f"{100 * row['pct']:>5.0f}%  {row['roof_used']:<17} {row['bound']} · {row['best']}")
-    for s in report["skipped"]:
-        entry = KERNELS.get(s["kernel"], {})
-        print(f"{entry.get('label', s['kernel'].upper()):<16} {entry.get('student', '?'):<11} "
-              f"{s.get('n', ''):>6}  skipped: {s['reason']}")
-    for r in report["results"]:
-        for w in r["warnings"]:
-            print(f"  warning ({r['kernel']}): {w}")
-    for note in report["notes"]:
-        print(f"  note: {note}")
-
-
-def render_all(data, machine, args, out, kernels_detail=(), kernels=None):
-    report = build_report(data, machine, args, kernels)
-    rows = write_summary(report, out, args)
-    plotted = [r for r in report["results"] if r["status"] == "ok"]
-    if plotted and report["roofs"]["1"]["peak"] and report["roofs"]["1"]["dram"]:
-        draw_class_chart(report, out, args)
-        for r in plotted:
-            if r["kernel"] in kernels_detail:
-                draw_kernel_chart(r, report, out, args)
-        if args.html:
-            write_html(report, rows, out, args)
-    elif plotted:
-        print("No roofs available: run without --plot-only once, or pass --peak-gflops and --bandwidth.")
-    return report, rows
+def measure(fn, *args, flops, bytes_moved, name=None, setup=None, reps=9, parallel=None,
+            working_set=None, read_only=False, unit="FLOP", roofs=None):
+    """
+    Time fn(*args), then place it on the roofline (see analyze_point).
+    - One warm-up call first: Numba compiles on the first call.
+    - setup(): optional; returns fresh arguments before every call, for kernels that
+      change their inputs in place. It is not timed.
+    - Time = mean of `reps` calls (the warm-up call is not counted).
+    - parallel=None: read it from the Numba function (compiled with parallel=True?).
+    - roofs=None: this machine's roofs (measured once, then cached).
+    """
+    if roofs is None:
+        roofs = build_roofs(load_machine())
+    if parallel is None:
+        parallel = bool(getattr(fn, "targetoptions", {}).get("parallel"))
+    fn(*(setup() if setup else args))
+    total = 0.0
+    for _ in range(reps):
+        call_args = setup() if setup else args
+        t = time.perf_counter()
+        fn(*call_args)
+        total += time.perf_counter() - t
+    return analyze_point(name or getattr(fn, "__name__", "computation"), roofs, flops=flops,
+                         bytes_moved=bytes_moved, seconds=total / reps, parallel=parallel,
+                         working_set=working_set, read_only=read_only, unit=unit)
 
 
 # ---------------------------------------------------------
 # Charts
 # - matplotlib's Figure + Agg canvas directly (no pyplot): no window can pop up.
 # - Axes sit at fixed positions so the slanted roof labels keep their angle.
-# - Colors live in a theme dict, so the HTML page can draw a dark version too.
+# - Colors live in a theme dict, so a caller can add colors (e.g. one per series).
 # ---------------------------------------------------------
-# Kernel colors, fixed by position in KERNELS (a kernel keeps its color in every run)
-# - Okabe-Ito (colorblind-safe), with black and #B8A400 replaced: black vanished
-#   into the roof line, and #B8A400 next to #E69F00 failed the colorblind check.
-# - All 36 pairs checked under simulated red/green colorblindness: worst
-#   distance 7.6 (OKLab x100), and every kernel is also labelled by name.
-KERNEL_COLORS = ["#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7",
-                 "#56B4E9", "#8800FF", "#CC0099", "#882255"]
-
 LIGHT = dict(
     surface="#ffffff", bg_mem="#eef4fb", bg_comp="#fdf6ec", ink="#111827", ink2="#4b5563",
     muted="#6b7280", grid="#e5e7eb", faint="#9ca3af", ridge="#6d28d9", l3="#6b7280",
-    kernels=KERNEL_COLORS, other="#6b7280",
     pill={"Memory-bound": ("#dbeafe", "#1e3a8a"), "Compute-bound": ("#fdecc8", "#7c4a03")},
     bar={"Memory-bound": "#2a78d6", "Compute-bound": "#eda100"},
     # ordinal ramp for baseline families: early versions light, late versions dark
@@ -1211,20 +690,13 @@ LIGHT = dict(
 )
 
 
-def kernel_color(key, theme):
-    order = list(KERNELS)
-    if key in order and order.index(key) < len(theme["kernels"]):
-        return theme["kernels"][order.index(key)]
-    return theme["other"]          # never invent a 10th hue
-
-
 def _ramp_color(theme, t):
     from matplotlib.colors import LinearSegmentedColormap
     cmap = LinearSegmentedColormap.from_list("fam", theme["ramp"])
     return cmap(min(1.0, max(0.0, t)))
 
 
-def _new_figure(w, h, theme):
+def new_figure(w, h, theme):
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     fig = Figure(figsize=(w, h), dpi=100, facecolor=theme["surface"])
@@ -1232,7 +704,7 @@ def _new_figure(w, h, theme):
     return fig
 
 
-def _style_axes(ax, theme, xlim, ylim):
+def style_axes(ax, theme, xlim, ylim):
     from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
     ax.set_xscale("log")
     ax.set_yscale("log")
@@ -1256,7 +728,7 @@ def _style_axes(ax, theme, xlim, ylim):
     ax.set_ylabel("Performance (GFLOP/s)", color=theme["ink2"], fontsize=10)
 
 
-def _limits(points, roofs, extra_x=()):
+def limits(points, roofs, extra_x=()):
     xs = [p["AI"] for p in points] + list(extra_x)
     ys = [p["P"] for p in points]
     peak_all = roofs["all"]["peak"] or roofs["1"]["peak"]
@@ -1272,7 +744,7 @@ def _limits(points, roofs, extra_x=()):
     return (xlo, xhi), (ylo, yhi)
 
 
-def _text_box(artist, renderer, pad=2):
+def text_box(artist, renderer, pad=2):
     bb = artist.get_window_extent(renderer)
     return bb.expanded(1, 1).padded(pad)
 
@@ -1329,7 +801,22 @@ def _line_angle(ax, x0, x1, y0, y1):
     return math.degrees(math.atan2(p1[1] - p0[1], p1[0] - p0[0]))
 
 
-def _slant_label(ax, text, bw, xlim, ylim, ridge, frac, above, color, size=8.5, gid=None):
+def _slant_hits(label, dots, renderer, r=6):
+    """Does a dot (display pixels) sit on this rotated label? Checks the rotated text box."""
+    w, h, _ = renderer.get_text_width_height_descent(label.get_text(), label.get_fontproperties(),
+                                                     ismath=False)
+    bb = label.get_window_extent(renderer)
+    cx, cy = (bb.x0 + bb.x1) / 2, (bb.y0 + bb.y1) / 2
+    ang = math.radians(label.get_rotation())
+    ux, uy = math.cos(ang), math.sin(ang)
+    for px, py in dots:
+        along, across = (px - cx) * ux + (py - cy) * uy, -(px - cx) * uy + (py - cy) * ux
+        if abs(along) <= w / 2 + r and abs(across) <= h / 2 + r:
+            return True
+    return False
+
+
+def _slant_label(ax, text, bw, xlim, ylim, ridge, frac, above, color, size=8.5, gid=None, dots=()):
     """Text written along a bandwidth roof, rotated to its on-screen slope."""
     lo, hi = math.log10(ylim[0]), math.log10(ylim[1])
     y = 10 ** (lo + frac * (hi - lo))
@@ -1348,14 +835,26 @@ def _slant_label(ax, text, bw, xlim, ylim, ridge, frac, above, color, size=8.5, 
             break
         x *= 1.1
         label.xy = (x, bw * x)
+    # a dot on the label: slide along the line to the nearest clear spot (else stay)
+    if dots and _slant_hits(label, dots, renderer):
+        for k in (1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6, -6, 7, 8):
+            xk = x * 1.15 ** k
+            if xk > ridge / 1.5:
+                continue
+            label.xy = (xk, bw * xk)
+            if label.get_window_extent(renderer).x0 >= left and not _slant_hits(label, dots, renderer):
+                break
+        else:
+            label.xy = (x, bw * x)
     return label
 
 
-def _draw_roofs(ax, roofs, xlim, ylim, theme, levels_used, renderer, dots=()):
+def draw_roofs(ax, roofs, xlim, ylim, theme, levels_used, renderer, dots=()):
     """Draw the roofs, their labels and the ridge points. Returns the obstacles for labels."""
     from matplotlib.transforms import Bbox
     # peak labels must also clear dots and the corner texts already on the axes
-    dot_boxes = [_dot_box(ax, xy, 7) for xy in dots] + [_text_box(t, renderer) for t in ax.texts]
+    dot_boxes = [dot_box(ax, xy, 7) for xy in dots] + [text_box(t, renderer) for t in ax.texts]
+    dot_px = [tuple(ax.transData.transform(xy)) for xy in dots]    # roof labels slide off dots
     import numpy as np
     x_all = np.logspace(math.log10(xlim[0]), math.log10(xlim[1]), 400)
     artists = []
@@ -1396,19 +895,19 @@ def _draw_roofs(ax, roofs, xlim, ylim, theme, levels_used, renderer, dots=()):
                 continue
             src1 = " (user)" if roofs["1"].get("dram_src") == "user" else ""
             low = min(bw, one)
-            text = (f"DRAM {_fmt(bw)} GB/s{src}" if abs(bw - one) < 0.05 else
-                    f"DRAM {_fmt(bw)} GB/s{src} (1 core {_fmt(one)}{src1})")
+            text = (f"DRAM {fmt(bw)} GB/s{src}" if abs(bw - one) < 0.05 else
+                    f"DRAM {fmt(bw)} GB/s{src} (1 core {fmt(one)}{src1})")
             artists.append(_slant_label(ax, text, low, xlim, ylim, pi / low, 0.24, above=False,
-                                        color=theme["ink2"], gid=f"rooflabel-{cores}-{lvl}"))
+                                        color=theme["ink2"], gid=f"rooflabel-{cores}-{lvl}", dots=dot_px))
             continue
         # all-core label above its line, 1-core below, so the two near-parallel slopes stay readable
         frac = {("all", "dram"): 0.30, ("1", "dram"): 0.22, ("all", "l3"): 0.52, ("1", "l3"): 0.40,
                 # read-only labels go near the top of their slope, clear of the DRAM labels
                 ("all", "dram_read"): 0.95, ("1", "dram_read"): 0.85}[(cores, lvl)]
-        artists.append(_slant_label(ax, f"{name} {_fmt(bw)} GB/s · {who}{src}", bw, xlim, ylim, pi / bw,
+        artists.append(_slant_label(ax, f"{name} {fmt(bw)} GB/s · {who}{src}", bw, xlim, ylim, pi / bw,
                                     frac, above=(cores == "all"),
                                     color=theme["ink2"] if lvl != "l3" else theme["l3"],
-                                    gid=f"rooflabel-{cores}-{lvl}"))
+                                    gid=f"rooflabel-{cores}-{lvl}", dots=dot_px))
     # ridge points (DRAM roofs), drawn before the peak labels so those can avoid them
     for cores in ("all", "1"):
         r = roofs[cores]
@@ -1418,19 +917,22 @@ def _draw_roofs(ax, roofs, xlim, ylim, theme, levels_used, renderer, dots=()):
         ridge = r["peak"] / r["dram"]
         ax.plot([ridge], [r["peak"]], marker="D", markersize=6.5, markerfacecolor=theme["surface"],
                 markeredgecolor=theme["ridge"], markeredgewidth=1.5, zorder=6, gid=f"ridge-{cores}")
-        rl = ax.annotate(f"ridge ≈ {_fmt(ridge)} FLOP/byte", (ridge, r["peak"]), xytext=(7, -5),
+        rl = ax.annotate(f"ridge ≈ {fmt(ridge)} FLOP/byte", (ridge, r["peak"]), xytext=(7, -5),
                          textcoords="offset points", ha="left", va="top", fontsize=8.5,
                          color=theme["ridge"], gid=f"ridgelabel-{cores}")
         artists.append(rl)
-        dot_boxes.append(_text_box(rl, renderer))
+        dot_boxes.append(text_box(rl, renderer))
     # flat compute roofs: label once per core count
     for cores in ("all", "1"):
         r = roofs[cores]
         if not r["peak"] or (cores == "1" and roofs["all"]["peak"] == r["peak"]):
             continue
-        who = "All cores" if cores == "all" else "1 core"
+        # one peak for both (e.g. a single --peak-gflops value): no "All cores", and no
+        # theoretical line unless both core counts share the same theoretical peak
+        same = roofs["1"]["peak"] == roofs["all"]["peak"]
+        who = "Peak" if same else "All cores" if cores == "all" else "1 core"
         how = r["peak_src"]
-        theo = r.get("theo")
+        theo = r.get("theo") if not same or roofs["1"].get("theo") == roofs["all"].get("theo") else None
         show_theo = bool(theo and how != "theoretical" and abs(theo - r["peak"]) / r["peak"] > 0.03)
         # two short lines, above the faint theoretical line when it is close
         # - right end above the line, else right end below it, else next to the ridge;
@@ -1441,13 +943,14 @@ def _draw_roofs(ax, roofs, xlim, ylim, theme, levels_used, renderer, dots=()):
                  (ridge_x * 1.15, above, 6, "left", 1)]
         for i, (x_at, y_at, dx, ha, side) in enumerate(spots):
             va = "bottom" if side > 0 else "top"
-            note = ax.annotate(how + (f" · theoretical ≈ {_fmt(theo)}" if show_theo else ""),
+            note = ax.annotate(how + (f" · theoretical ≈ {fmt(theo)}" if show_theo else ""),
                                (x_at, y_at), xytext=(dx, 4 * side), textcoords="offset points",
                                ha=ha, va=va, fontsize=7.5, color=theme["muted"], gid=f"peaknote-{cores}")
-            main = ax.annotate(f"{who} · peak ≈ {_fmt(r['peak'])} GFLOP/s",
+            main = ax.annotate(f"Peak ≈ {fmt(r['peak'])} GFLOP/s" if same else
+                               f"{who} · peak ≈ {fmt(r['peak'])} GFLOP/s",
                                (x_at, y_at), xytext=(dx, 15 * side), textcoords="offset points",
                                ha=ha, va=va, fontsize=8.5, color=theme["ink2"], gid=f"peaklabel-{cores}")
-            box = Bbox.union([_text_box(note, renderer, 0), _text_box(main, renderer, 0)])
+            box = Bbox.union([text_box(note, renderer, 0), text_box(main, renderer, 0)])
             if (not any(box.overlaps(b) for b in dot_boxes) and not avoid.hits(box)) or i == len(spots) - 1:
                 break
             note.remove()
@@ -1458,11 +961,11 @@ def _draw_roofs(ax, roofs, xlim, ylim, theme, levels_used, renderer, dots=()):
             ax.plot([theo / r["dram"], xlim[1]], [theo, theo], color=theme["faint"], linewidth=0.9,
                     linestyle=(0, (4, 3)), alpha=0.7, zorder=2, gid=f"theo-{cores}")
     for a in artists:
-        avoid.append(_text_box(a, renderer))
+        avoid.append(text_box(a, renderer))
     return avoid
 
 
-def _place_label(ax, renderer, xy, lines, avoid, theme, color_line, gid=None, size=8.5):
+def place_label(ax, renderer, xy, lines, avoid, theme, color_line, gid=None, size=8.5):
     """
     Greedy label placer: try offsets in rings around the dot, nearest first, and
     keep the first whose text box covers no earlier label, dot or roof line and
@@ -1491,7 +994,7 @@ def _place_label(ax, renderer, xy, lines, avoid, theme, color_line, gid=None, si
                          fontsize=size, fontweight="bold", color=theme["ink"], zorder=8)
         t2 = ax.annotate(detail, xy, xytext=(dx, y2), textcoords="offset points", ha=ha, va=va,
                          fontsize=size - 0.5, color=theme["ink2"], zorder=8)
-        return t1, t2, Bbox.union([_text_box(t1, renderer), _text_box(t2, renderer)])
+        return t1, t2, Bbox.union([text_box(t1, renderer), text_box(t2, renderer)])
 
     choice, fewest = None, None
     dot = ax.transData.transform(xy)
@@ -1522,258 +1025,74 @@ def _place_label(ax, renderer, xy, lines, avoid, theme, color_line, gid=None, si
     return box
 
 
-def _dot_box(ax, xy, r=6):
+def dot_box(ax, xy, r=6):
     from matplotlib.transforms import Bbox
     px, py = ax.transData.transform(xy)
     return Bbox([[px - r, py - r], [px + r, py + r]])
 
 
-def _plotted(res, args):
-    return [p for p in res["points"] if args.include_python or not p["python"]]
-
-
-def _subtitle(report, sizes):
-    m = report["machine"]
-    nt = (m.get("measured") or {}).get("numba_threads")
-    parts = [m.get("cpu", "unknown CPU")]
-    if m.get("physical_alloc"):
-        parts.append(f"{m['physical_alloc']} cores / {m.get('allocated_cpus')} threads")
-    layers = sorted({r["run"].get("threading_layer") for r in report["results"]} - {None})
-    if nt:
-        parts.append(f"Numba threads {nt}" + (f" ({', '.join(layers)})" if layers else ""))
-    parts.append(datetime.date.today().isoformat())
-    if sizes:
-        parts.append("N: " + ", ".join(sizes))
-    return " · ".join(parts)
-
-
-def _footer(fig, notes, theme, y0=0.018):
+def footer(fig, notes, theme, y0=0.018):
     fig.text(0.04, y0, "\n".join(notes), fontsize=8, color=theme["muted"], ha="left", va="bottom",
              linespacing=1.45)
 
 
-def _save(fig, out, stem, dpi=200):
+def save_figure(fig, out, stem, dpi=200):
     for ext in ("png", "svg"):
         tmp = out / f"{stem}.tmp.{ext}"
         fig.savefig(tmp, dpi=dpi, facecolor=fig.get_facecolor())
         os.replace(tmp, out / f"{stem}.{ext}")
 
 
-def class_figure(report, args, theme=LIGHT, all_points=None, gid_prefix="c"):
-    """The class chart: one machine's roofs, start -> best per kernel, verdict panel."""
-    from matplotlib.patches import FancyArrowPatch
-    show_all = args.all if all_points is None else all_points
-    results = [r for r in report["results"] if r["status"] == "ok"]
-    roofs = report["roofs"]
-    # SVG ids for the HTML page: <prefix>-k<kernel>-pt<row> for start/best, -xpt<row> for the rest
-    for ki, r in enumerate(results):
-        for j, p in enumerate(r["points"]):
-            p["gid"] = f"{gid_prefix}-k{ki}-{'pt' if p is r['start'] or p is r['best'] else 'xpt'}{j}"
-    fig = _new_figure(13, 7.5, theme)
-    renderer = fig.canvas.get_renderer()
-
-    pts = []
-    for r in results:
-        pts += [r["start"]] + ([r["best"]] if r["best"] else [])
-        if show_all:
-            pts += _plotted(r, args)
-        elif args.include_python:
-            pts += [p for p in r["points"] if p["python"]]
-    xlim, ylim = _limits(pts, roofs)
-    # more than five footnotes: lift the plot so the footer clears the x-axis label
-    lift = 0.024 * max(0, len(footnotes(report, args)) - 5)
-    ax = fig.add_axes([0.065, 0.20 + lift, 0.615, 0.66 - lift])
-    _style_axes(ax, theme, xlim, ylim)
-
-    # memory-bound / compute-bound background, split at the all-core ridge
-    ridge_all = roofs["all"]["peak"] / roofs["all"]["dram"]
-    ax.axvspan(xlim[0], ridge_all, color=theme["bg_mem"], zorder=0, linewidth=0, gid="bg-mem")
-    ax.axvspan(ridge_all, xlim[1], color=theme["bg_comp"], zorder=0, linewidth=0, gid="bg-comp")
-    corner = dict(fontsize=7.5, color=theme["muted"], transform=ax.transAxes, va="top", zorder=1)
-    ax.text(0.012, 0.985, "M E M O R Y - B O U N D", ha="left", **corner)
-    ax.text(0.988, 0.985, "C O M P U T E - B O U N D", ha="right", **corner)
-
-    levels = {p["level"] for p in pts}
-    avoid = _draw_roofs(ax, roofs, xlim, ylim, theme, levels, renderer, [(p["AI"], p["P"]) for p in pts])
-    avoid.append(_text_box(ax.texts[0], renderer))
-    avoid.append(_text_box(ax.texts[1], renderer))
-
-    # every baseline as a small dot (--all); failed ones as x
-    for r in results:
-        col = kernel_color(r["kernel"], theme)
-        if show_all or args.include_python:
-            for p in (_plotted(r, args) if show_all else [p for p in r["points"] if p["python"]]):
-                if p is r["start"] or p is r["best"]:
-                    continue
-                ax.plot([p["AI"]], [p["P"]], marker="x" if not p["correct"] else "o",
-                        markersize=4.5 if p["correct"] else 5, color=col, alpha=0.55,
-                        markeredgewidth=1.1, linestyle="none", zorder=4, gid=p.get("gid"))
-                avoid.append(_dot_box(ax, (p["AI"], p["P"]), 3))
-
-    # start (hollow) -> best (filled) with an arrow, colored per kernel
-    for r in results:
-        col = kernel_color(r["kernel"], theme)
-        s, b = r["start"], r["best"]
-        if b is None:
-            # every baseline failed its check: x markers, no best and no arrow
-            ax.plot([s["AI"]], [s["P"]], marker="x", markersize=8, color=col, markeredgewidth=1.8,
-                    linestyle="none", zorder=6, gid=s.get("gid"))
-            avoid.append(_dot_box(ax, (s["AI"], s["P"]), 6))
-            continue
-        ax.plot([s["AI"]], [s["P"]], marker="o", markersize=7, markerfacecolor=theme["surface"],
-                markeredgecolor=col, markeredgewidth=1.6, linestyle="none", zorder=6, gid=s.get("gid"))
-        avoid.append(_dot_box(ax, (s["AI"], s["P"]), 6))
-        if b is not s:
-            arrow = FancyArrowPatch((s["AI"], s["P"]), (b["AI"], b["P"]), arrowstyle="-|>",
-                                    connectionstyle="arc3,rad=0.15", mutation_scale=11, color=col,
-                                    alpha=0.6, linewidth=1.4, shrinkA=5, shrinkB=6, zorder=5,
-                                    gid=f"{gid_prefix}-k{results.index(r)}-arrow")
-            ax.add_patch(arrow)
-            avoid.add_segment(ax.transData.transform((s["AI"], s["P"])), ax.transData.transform((b["AI"], b["P"])))
-        ax.plot([b["AI"]], [b["P"]], marker="o", markersize=9, markerfacecolor=col,
-                markeredgecolor=theme["surface"], markeredgewidth=1.2, linestyle="none", zorder=7,
-                gid=b.get("gid"))
-        avoid.append(_dot_box(ax, (b["AI"], b["P"]), 7))
-
-    # key for the marks (lower right is the emptiest corner of a roofline)
-    from matplotlib.lines import Line2D
-    key = [Line2D([], [], marker="o", linestyle="none", markersize=7, markerfacecolor=theme["surface"],
-                  markeredgecolor=theme["ink2"], markeredgewidth=1.6, label="start (first compiled version)"),
-           Line2D([], [], marker="o", linestyle="none", markersize=9, markerfacecolor=theme["ink2"],
-                  markeredgecolor=theme["surface"], label="best correct version")]
-    if show_all:
-        key += [Line2D([], [], marker="o", linestyle="none", markersize=4.5, color=theme["ink2"], alpha=0.55,
-                       label="other baselines"),
-                Line2D([], [], marker="x", linestyle="none", markersize=5, color=theme["ink2"],
-                       markeredgewidth=1.1, label="failed check")]
-    leg = ax.legend(handles=key, loc="lower right", fontsize=8, frameon=True, framealpha=0.92,
-                    edgecolor=theme["grid"], facecolor=theme["surface"], labelcolor=theme["ink2"])
-    avoid.append(leg.get_window_extent(renderer))
-
-    # labels by the best dots, placed greedily
-    for r in results:
-        b = r["best"] or r["start"]
-        entry = KERNELS.get(r["kernel"], {})
-        unit = "GOP/s" if r["unit"] == "OP" else "GFLOP/s"
-        title = f"{entry.get('label', r['kernel'].upper())} · {entry.get('student', '?')}"
-        if r["best"]:
-            sp = b["P"] / r["start"]["P"]
-            detail = f"{b['P']:.3g} {unit} · {100 * b['pct']:.0f}% of roof · {sp:.1f}×"
-        else:
-            detail = "no correct baseline"
-        _place_label(ax, renderer, (b["AI"], b["P"]), (title, detail), avoid, theme, theme["faint"],
-                     gid=f"{gid_prefix}-k{results.index(r)}-label")
-
-    # title and subtitle (N per kernel on its own line when the subtitle gets long)
-    sizes = [f"{KERNELS.get(r['kernel'], {}).get('label', r['kernel']).lower()} {r['n']}" for r in results]
-    fig.text(0.04, 0.955, "ECE 752 SwiftPack · Class Roofline", fontsize=16, fontweight="bold",
-             color=theme["ink"], ha="left", va="bottom")
-    sub = _subtitle(report, sizes)
-    if len(sub) > 130:
-        sub = _subtitle(report, []) + "\nN: " + ", ".join(sizes)
-    fig.text(0.04, 0.945, sub, fontsize=10.5, color=theme["muted"], ha="left", va="top", linespacing=1.4)
-
-    # right panel: one row per kernel
-    panel = fig.add_axes([0.715, 0.20 + lift, 0.265, 0.66 - lift])
-    panel.set_xlim(0, 1)
-    panel.set_ylim(0, 1)
-    panel.axis("off")
-    panel.text(0, 1.0, "B E S T   B A S E L I N E   P E R   K E R N E L", fontsize=7.5, color=theme["muted"],
-               va="top", ha="left")
-    # kernels that ran but cannot be plotted (no byte model) are listed like skips
-    not_plotted = [dict(kernel=r["kernel"], reason=r["status"]) for r in report["results"] if r["status"] != "ok"]
-    rows = [(r, None) for r in results] + [(None, s) for s in not_plotted + report["skipped"]]
-    step = min(0.095, 0.93 / max(1, len(rows)))
-    y = 0.93
-    for r, s in rows:
-        key = r["kernel"] if r else s["kernel"]
-        entry = KERNELS.get(key, {})
-        col = kernel_color(key, theme)
-        name = f"{entry.get('label', key.upper())} · {entry.get('student', '?')}"
-        if r:
-            panel.plot([0.02], [y], marker="o", markersize=9, color=col, markeredgecolor=theme["surface"],
-                       markeredgewidth=1.2, transform=panel.transAxes, clip_on=False)
-            panel.text(0.07, y, name, fontsize=9.5, color=theme["ink"], va="center", ha="left",
-                       fontweight="bold")
-            b = r["best"]
-            if b:
-                bg, fg = theme["pill"][b["bound"]]
-                panel.text(0.855, y, b["bound"], fontsize=8, color=fg, va="center", ha="right",
-                                  bbox=dict(boxstyle="round,pad=0.32,rounding_size=0.75", facecolor=bg,
-                                            edgecolor="none"))
-                panel.text(1.0, y, f"{100 * b['pct']:.0f}%", fontsize=9.5, color=theme["ink"],
-                           va="center", ha="right")
-                sub = f"{b['name']} · N={r['n']} · {LEVEL_NAMES[b['level']]}, " \
-                      f"{'all cores' if b['cores'] == 'all' else '1 core'}"
-            else:
-                sub = "no correct baseline"
-            panel.text(0.07, y - step * 0.36, sub, fontsize=7.5, color=theme["muted"], va="center", ha="left")
-        else:
-            panel.plot([0.02], [y], marker="o", markersize=8, markerfacecolor=theme["surface"],
-                       markeredgecolor=theme["faint"], markeredgewidth=1.2, transform=panel.transAxes,
-                       clip_on=False)
-            panel.text(0.07, y, name, fontsize=9.5, color=theme["muted"], va="center", ha="left")
-            reason = s["reason"] if len(s["reason"]) <= 52 else s["reason"][:50] + "…"
-            prefix = "not plotted: " if s in not_plotted else "skipped: "
-            panel.text(0.07, y - step * 0.36, prefix + reason, fontsize=7.5, color=theme["muted"],
-                       va="center", ha="left")
-        y -= step
-    panel.text(1.0, 1.0, "% OF ROOF", fontsize=7.5, color=theme["muted"], va="top", ha="right")
-
-    _footer(fig, footnotes(report, args), theme)
-    return fig
-
-
-def draw_class_chart(report, out, args):
-    fig = class_figure(report, args)
-    _save(fig, out, "roofline_class")
-
-
-def kernel_figure(res, report, args, theme=LIGHT):
-    """Per-kernel chart: every baseline, colored by family, % of roof bars on the right."""
-    pts = _plotted(res, args)
-    roofs = report["roofs"]
-    entry = KERNELS.get(res["kernel"], {})
+def roofline_figure(points, roofs, title, subtitle="", notes=(), best=None, start=None, theme=LIGHT):
+    """
+    One roofline chart: this machine's roofs, one dot per point, % of roof bars on the right.
+    - points: dicts from analyze_point(). Optional keys: "family" (versions of one idea
+      share a number; dots go from light to dark) and "correct" (False draws an x).
+    - best / start: labelled first, tagged "(best)" and "(start)"; then the fastest
+      correct points, 5 labels at most.
+    - One point (or none): no bar panel, since the dot's label already gives % of roof.
+    """
+    pts = list(points)
     by_perf = sorted(pts, key=lambda p: p["P"], reverse=True)
-    notes = footnotes(report, args)[:1] + [n for n in footnotes(report, args)[1:]
-                                           if "Python" in n or "BLAS" in n or "workqueue" in n
-                                           or ("read-only" in n and any(p["level"] == "dram_read" for p in pts))]
-    notes += ["Warning: " + w[:150] for w in res["warnings"][:2]]
+    notes = list(notes)
+    show_bars = len(pts) >= 2
     h = max(7.5, 2.2 + 0.19 * len(by_perf))
-    fig = _new_figure(13, h, theme)
+    fig = new_figure(13 if show_bars else 10, h, theme)
     renderer = fig.canvas.get_renderer()
     top = 1 - 0.95 / h * 1.25
     bottom = (0.75 + 0.17 * len(notes)) / h     # room for the x-axis label and the footer
-    xlim, ylim = _limits(pts, roofs)
-    ax = fig.add_axes([0.065, bottom, 0.56, top - bottom])
-    _style_axes(ax, theme, xlim, ylim)
+    xlim, ylim = limits(pts, roofs)
+    ax = fig.add_axes([0.065, bottom, 0.56, top - bottom] if show_bars else [0.085, bottom, 0.87, top - bottom])
+    style_axes(ax, theme, xlim, ylim)
     ridge_all = roofs["all"]["peak"] / roofs["all"]["dram"]
     ax.axvspan(xlim[0], ridge_all, color=theme["bg_mem"], zorder=0, linewidth=0)
     ax.axvspan(ridge_all, xlim[1], color=theme["bg_comp"], zorder=0, linewidth=0)
     corner = dict(fontsize=7.5, color=theme["muted"], transform=ax.transAxes, va="top", zorder=1)
     c1 = ax.text(0.012, 0.985, "M E M O R Y - B O U N D", ha="left", **corner)
     c2 = ax.text(0.988, 0.985, "C O M P U T E - B O U N D", ha="right", **corner)
-    avoid = _draw_roofs(ax, roofs, xlim, ylim, theme, {p["level"] for p in pts}, renderer,
-                        [(p["AI"], p["P"]) for p in pts])
-    avoid.append(_text_box(c1, renderer))
-    avoid.append(_text_box(c2, renderer))
+    # no points: draw every roof, so the chart shows the whole machine
+    levels = {p["level"] for p in pts} if pts else {"l3", "dram_read"}
+    avoid = draw_roofs(ax, roofs, xlim, ylim, theme, levels, renderer,
+                       [(p["AI"], p["P"]) for p in pts])
+    avoid.append(text_box(c1, renderer))
+    avoid.append(text_box(c2, renderer))
 
-    fams = sorted({p["family"] for p in pts if p["family"] is not None})
+    fams = sorted({p.get("family") for p in pts if p.get("family") is not None})
     def fam_color(p):
-        if p["family"] is None or len(fams) < 2:
+        if p.get("family") is None or len(fams) < 2:
             return _ramp_color(theme, 0.6)
         return _ramp_color(theme, fams.index(p["family"]) / (len(fams) - 1))
 
     for p in sorted(pts, key=lambda p: p["P"]):
         col = fam_color(p)
-        if not p["correct"]:
+        if not p.get("correct", True):
             ax.plot([p["AI"]], [p["P"]], marker="x", markersize=7, color=col, markeredgewidth=1.6,
                     linestyle="none", zorder=5)
         else:
             ax.plot([p["AI"]], [p["P"]], marker="^" if p["parallel"] else "o",
                     markersize=8 if p["parallel"] else 7.5, markerfacecolor=col,
                     markeredgecolor=theme["surface"], markeredgewidth=1.1, linestyle="none", zorder=6)
-        avoid.append(_dot_box(ax, (p["AI"], p["P"]), 5))
+        avoid.append(dot_box(ax, (p["AI"], p["P"]), 5))
 
     # legend: marker shapes and the family ramp
     from matplotlib.lines import Line2D
@@ -1788,328 +1107,229 @@ def kernel_figure(res, report, args, theme=LIGHT):
                            markerfacecolor=_ramp_color(theme, 0.0), label=f"family {fams[0]} (first)"),
                     Line2D([], [], marker="s", linestyle="none", markersize=8, markeredgecolor="none",
                            markerfacecolor=_ramp_color(theme, 1.0), label=f"family {fams[-1]} (last)")]
-    leg = ax.legend(handles=handles, loc="lower right", fontsize=8, frameon=True, framealpha=0.92,
-                    edgecolor=theme["grid"], facecolor=theme["surface"], labelcolor=theme["ink2"])
-    avoid.append(leg.get_window_extent(renderer))
+    if not show_bars:
+        # one dot (or none): only the marker that is on the chart
+        kinds = {"failed check" if not p.get("correct", True) else "parallel" if p["parallel"] else "serial"
+                 for p in pts}
+        handles = [hd for hd in handles if hd.get_label() in kinds]
+    if handles:
+        leg = ax.legend(handles=handles, loc="lower right", fontsize=8, frameon=True, framealpha=0.92,
+                        edgecolor=theme["grid"], facecolor=theme["surface"], labelcolor=theme["ink2"])
+        avoid.append(leg.get_window_extent(renderer))
 
-    # labels: start, best and the top 3 others
-    unit = "GOP/s" if res["unit"] == "OP" else "GFLOP/s"
+    # labels: best, start and the fastest others
+    unit = "GOP/s" if pts and pts[0].get("unit") == "OP" else "GFLOP/s"
     chosen = []
-    for p in [res["best"], res["start"]] + [q for q in by_perf if q["correct"]]:
+    for p in [best, start] + [q for q in by_perf if q.get("correct", True)]:
         if p is not None and p not in chosen and len(chosen) < 5:
             chosen.append(p)
     for p in chosen:
-        tag = " (best)" if p is res["best"] else " (start)" if p is res["start"] else ""
-        _place_label(ax, renderer, (p["AI"], p["P"]), (p["name"] + tag,
-                     f"{p['P']:.3g} {unit} · {100 * p['pct']:.0f}% of roof"), avoid, theme, theme["faint"],
-                     size=8)
+        tag = " (best)" if p is best else " (start)" if p is start else ""
+        place_label(ax, renderer, (p["AI"], p["P"]), (p["name"] + tag,
+                    f"{p['P']:.3g} {unit} · {100 * p['pct']:.0f}% of roof"), avoid, theme, theme["faint"],
+                    size=8)
 
-    title = f"{entry.get('label', res['kernel'].upper())} · {entry.get('student', '?')} · Roofline, N={res['n']}"
     fig.text(0.04, 1 - 0.35 / h, title, fontsize=16, fontweight="bold", color=theme["ink"], ha="left", va="top")
-    fig.text(0.04, 1 - 0.72 / h, _subtitle(report, []), fontsize=10.5, color=theme["muted"], ha="left", va="top")
+    fig.text(0.04, 1 - 0.72 / h, subtitle, fontsize=10.5, color=theme["muted"], ha="left", va="top")
 
-    # right panel: % of roof per baseline, sorted by performance
-    bx = fig.add_axes([0.80, bottom, 0.17, top - bottom])
-    names = [p["name"] for p in by_perf]
-    vals = [100 * p["pct"] for p in by_perf]
-    cols = [theme["bar"][p["bound"]] for p in by_perf]
-    ypos = list(range(len(by_perf)))[::-1]
-    bars = bx.barh(ypos, vals, height=0.62, color=cols, edgecolor="none")
-    for bar, p in zip(bars, by_perf):
-        if p["far"]:
-            bar.set_alpha(0.45)
-        if not p["correct"]:
-            bar.set_hatch("///")
-            bar.set_alpha(0.35)
-    vmax = max(vals + [100])
-    bx.set_xlim(0, vmax * 1.28)
-    bx.set_ylim(-0.7, len(by_perf) - 0.3)
-    bx.set_yticks(ypos)
-    bx.set_yticklabels([n + (" ✗" if not p["correct"] else "") for n, p in zip(names, by_perf)],
-                       fontsize=7.5 if len(names) > 22 else 8.5, color=theme["ink2"])
-    for lbl, p in zip(bx.get_yticklabels(), by_perf):
-        if p is res["best"]:
-            lbl.set_fontweight("bold")
-            lbl.set_color(theme["ink"])
-    for yy, v in zip(ypos, vals):
-        bx.text(v + vmax * 0.02, yy, f"{v:.0f}%", va="center", ha="left",
-                fontsize=7 if len(names) > 22 else 8, color=theme["ink2"])
-    bx.axvline(100, color=theme["faint"], linewidth=0.8, linestyle=(0, (3, 2)))
-    bx.tick_params(axis="y", length=0)
-    bx.tick_params(axis="x", colors=theme["muted"], labelsize=8)
-    for side in ("top", "right", "left"):
-        bx.spines[side].set_visible(False)
-    bx.spines["bottom"].set_color(theme["faint"])
-    bx.set_facecolor(theme["surface"])
-    bx.set_title("% of roof, sorted by performance", fontsize=8.5, color=theme["muted"], loc="left")
-    from matplotlib.patches import Patch
-    # bar legend under the panel, clear of the bars and the 100% line
-    fig.legend(handles=[Patch(color=theme["bar"]["Memory-bound"], label="memory-bound"),
-                        Patch(color=theme["bar"]["Compute-bound"], label="compute-bound"),
-                        Patch(color=theme["bar"]["Memory-bound"], alpha=0.45, label="faded: < 10% of roof")],
-               loc="lower right", bbox_to_anchor=(0.985, 0.1 / h), fontsize=8, frameon=False,
-               labelcolor=theme["ink2"], ncol=1)
+    if show_bars:
+        # right panel: % of roof per point, sorted by performance
+        bx = fig.add_axes([0.80, bottom, 0.17, top - bottom])
+        names = [p["name"] for p in by_perf]
+        vals = [100 * p["pct"] for p in by_perf]
+        cols = [theme["bar"][p["bound"]] for p in by_perf]
+        slots = max(len(by_perf), 6)        # few points: keep normal bar thickness, at the top
+        ypos = [slots - 1 - i for i in range(len(by_perf))]
+        bars = bx.barh(ypos, vals, height=0.62, color=cols, edgecolor="none")
+        for bar, p in zip(bars, by_perf):
+            if p["far"]:
+                bar.set_alpha(0.45)
+            if not p.get("correct", True):
+                bar.set_hatch("///")
+                bar.set_alpha(0.35)
+        vmax = max(vals + [100])
+        bx.set_xlim(0, vmax * 1.28)
+        bx.set_ylim(-0.7, slots - 0.3)
+        bx.set_yticks(ypos)
+        bx.set_yticklabels([n + (" ✗" if not p.get("correct", True) else "") for n, p in zip(names, by_perf)],
+                           fontsize=7.5 if len(names) > 22 else 8.5, color=theme["ink2"])
+        for lbl, p in zip(bx.get_yticklabels(), by_perf):
+            if p is best:
+                lbl.set_fontweight("bold")
+                lbl.set_color(theme["ink"])
+        for yy, v in zip(ypos, vals):
+            bx.text(v + vmax * 0.02, yy, f"{v:.0f}%", va="center", ha="left",
+                    fontsize=7 if len(names) > 22 else 8, color=theme["ink2"])
+        bx.axvline(100, color=theme["faint"], linewidth=0.8, linestyle=(0, (3, 2)))
+        bx.tick_params(axis="y", length=0)
+        bx.tick_params(axis="x", colors=theme["muted"], labelsize=8)
+        for side in ("top", "right", "left"):
+            bx.spines[side].set_visible(False)
+        bx.spines["bottom"].set_color(theme["faint"])
+        bx.set_facecolor(theme["surface"])
+        bx.set_title("% of roof, sorted by performance", fontsize=8.5, color=theme["muted"], loc="left")
+        from matplotlib.patches import Patch
+        # bar legend under the panel, clear of the bars and the 100% line
+        fig.legend(handles=[Patch(color=theme["bar"]["Memory-bound"], label="memory-bound"),
+                            Patch(color=theme["bar"]["Compute-bound"], label="compute-bound"),
+                            Patch(color=theme["bar"]["Memory-bound"], alpha=0.45, label="faded: < 10% of roof")],
+                   loc="lower right", bbox_to_anchor=(0.985, 0.1 / h), fontsize=8, frameon=False,
+                   labelcolor=theme["ink2"], ncol=1)
 
-    _footer(fig, notes, theme, y0=0.12 / h)
+    footer(fig, notes, theme, y0=0.12 / h)
     return fig
 
 
-def draw_kernel_chart(res, report, out, args):
-    fig = kernel_figure(res, report, args)
-    _save(fig, out, f"roofline_{res['kernel']}_N{res['n']}")
+def default_notes(points, roofs):
+    """Footnotes for a chart of computations given by the user."""
+    notes = ["Bytes moved are the user's estimate (no hardware counters), so AI is a model."]
+    if any(p["level"] == "dram_read" and roofs[p["cores"]]["dram_read"] > 1.02 * roofs[p["cores"]]["dram"]
+           for p in points):
+        notes.append("Read-only computations use the read-only DRAM roof (dash-dot).")
+    notes.append(roof_source_note(roofs))
+    return notes
+
+
+def plot_roofline(points, roofs, png_path, title=None, subtitle=None, notes=None, machine=None,
+                  dpi=200, theme=LIGHT):
+    """Draw roofline_figure() and save it as one PNG. Returns the PNG's path."""
+    pts = list(points)
+    if title is None:
+        title = "Roofline · " + pts[0]["name"] if len(pts) == 1 else "Roofline"
+    if subtitle is None:
+        subtitle = machine_line(machine)
+    if notes is None:
+        notes = default_notes(pts, roofs)
+    fig = roofline_figure(pts, roofs, title, subtitle, notes, theme=theme)
+    png_path = Path(png_path)
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = png_path.with_name(png_path.stem + ".tmp.png")
+    fig.savefig(tmp, dpi=dpi, facecolor=fig.get_facecolor())
+    os.replace(tmp, png_path)
+    return png_path
 
 
 # ---------------------------------------------------------
-# Interactive page (--html)
-# - One self-contained file: inline SVG of the class chart, no CDN, no internet.
-# - The chart keeps its light, colorblind-checked colors in both modes; the page
-#   around it follows the system's light or dark setting.
+# Table (CSV): one row per computation
 # ---------------------------------------------------------
-HTML_TEMPLATE = r"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Class Roofline</title>
-<style>
-:root { color-scheme: light; --page: #f6f7f9; --card: #ffffff; --ink: #111827; --ink2: #4b5563;
-  --muted: #6b7280; --line: #e5e7eb; --chip: #ffffff; --chip-off: #f3f4f6; --accent: #2a78d6;
-  --tip: #111827; --tip-ink: #f9fafb; }
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) { color-scheme: dark; --page: #0d0f12; --card: #ffffff; --ink: #f0efec;
-    --ink2: #c3c2b7; --muted: #9a9890; --line: #2c2c2a; --chip: #1a1a19; --chip-off: #121212;
-    --accent: #3987e5; --tip: #f0efec; --tip-ink: #111827; }
-}
-:root[data-theme="dark"] { color-scheme: dark; --page: #0d0f12; --card: #ffffff; --ink: #f0efec;
-  --ink2: #c3c2b7; --muted: #9a9890; --line: #2c2c2a; --chip: #1a1a19; --chip-off: #121212;
-  --accent: #3987e5; --tip: #f0efec; --tip-ink: #111827; }
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--page); color: var(--ink); font: 16px/1.45 system-ui, -apple-system,
-  "Segoe UI", sans-serif; }
-main { max-width: 1500px; margin: 0 auto; padding: 24px 16px 48px; }
-h1 { font-size: 28px; margin: 0 0 4px; }
-.sub { color: var(--muted); margin: 0 0 18px; }
-.bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
-.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-.seg button { border: 0; background: var(--chip); color: var(--ink2); padding: 7px 14px; font: inherit;
-  font-size: 14px; cursor: pointer; }
-.seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
-.chip { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 999px;
-  background: var(--chip); color: var(--ink); padding: 5px 12px 5px 9px; font: inherit; font-size: 14px;
-  cursor: pointer; }
-.chip i { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
-.chip[aria-pressed="false"] { background: var(--chip-off); color: var(--muted); text-decoration: line-through; }
-.chip[aria-pressed="false"] i { opacity: 0.25; }
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 8px;
-  overflow: hidden; }
-.card svg { display: block; width: 100%; height: auto; }
-/* both charts stay laid out (so their dots can be measured); the other one is just hidden */
-#chart { display: grid; }
-#chart .view { grid-area: 1 / 1; }
-#chart:not(.all) .view.a, #chart.all .view.b { visibility: hidden; }
-.hit { fill: transparent; pointer-events: none; outline: none; }
-svg.near { cursor: pointer; }
-.hit:focus { stroke: #2a78d6; stroke-width: 1.5; }
-#tip { position: fixed; pointer-events: none; background: var(--tip); color: var(--tip-ink); border-radius: 8px;
-  padding: 9px 12px; font-size: 13px; line-height: 1.5; box-shadow: 0 6px 24px rgba(0,0,0,.25);
-  display: none; max-width: 340px; z-index: 10; }
-#tip b { font-size: 14px; }
-.tablewrap { overflow-x: auto; margin-top: 22px; }
-table { border-collapse: collapse; width: 100%; font-size: 14px; }
-th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
-td.num { text-align: right; font-variant-numeric: tabular-nums; }
-.pill { border-radius: 999px; padding: 2px 9px; font-size: 12.5px; }
-.pill.mem { background: #dbeafe; color: #1e3a8a; }
-.pill.comp { background: #fdecc8; color: #7c4a03; }
-.sw { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
-.notes { color: var(--muted); font-size: 13px; margin-top: 16px; }
-.notes li { margin: 2px 0; }
-@media (max-width: 700px) { h1 { font-size: 22px; } .chip, .seg button { font-size: 13px; } }
-</style>
-</head>
-<body>
-<main>
-<h1>__TITLE__</h1>
-<p class="sub">__SUB__</p>
-<div class="bar">
-  <div class="seg" role="group" aria-label="Points shown">
-    <button id="m-best" aria-pressed="true">Start and best</button>
-    <button id="m-all" aria-pressed="false">All baselines</button>
-  </div>
-  __CHIPS__
-</div>
-<div class="card" id="chart"><div class="view b">__SVG_B__</div><div class="view a">__SVG_A__</div></div>
-<div class="tablewrap"><table>
-<thead><tr><th>Kernel</th><th>N</th><th>Start</th><th>Best baseline</th><th>Best</th><th>Speedup</th>
-<th>AI</th><th>Roof used</th><th>Roof</th><th>% of roof</th><th>Verdict</th><th>Bytes</th></tr></thead>
-<tbody>__ROWS__</tbody></table></div>
-<ul class="notes">__NOTES__</ul>
-</main>
-<div id="tip" role="tooltip"></div>
-<script>
-const DATA = __DATA__;
-const NS = "http://www.w3.org/2000/svg";
-const chart = document.getElementById("chart");
-const tip = document.getElementById("tip");
-const fmt = (v, d) => v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toPrecision(d || 3);
-
-function showTip(id, x, y) {
-  const p = DATA.points[id];
-  if (!p) return;
-  tip.innerHTML = `<b>${p.kernel} · ${p.student}</b><br>${p.name}${p.role ? " (" + p.role + ")" : ""}<br>` +
-    `N = ${p.n} · ${p.parallel ? "parallel" : "serial"} · ${p.correct ? "check passed" : "check FAILED"}<br>` +
-    `${fmt(p.P)} ${p.unit}/s at AI ${fmt(p.AI, 2)} FLOP/byte<br>` +
-    `Roof ${fmt(p.roof)} ${p.unit}/s (${p.level}, ${p.cores}) · ${Math.round(100 * p.pct)}% of roof<br>${p.verdict}`;
-  tip.style.display = "block";
-  const w = tip.offsetWidth, h = tip.offsetHeight;
-  tip.style.left = Math.min(window.innerWidth - w - 8, x + 14) + "px";
-  tip.style.top = (y - h - 12 < 4 ? y + 16 : y - h - 12) + "px";
-}
-function hideTip() { tip.style.display = "none"; }
-
-// Each dot gets a focusable circle (keyboard), and the mouse picks the nearest
-// visible dot within 12 px, so dots stacked on top of each other stay reachable.
-function addHits(svg, prefix) {
-  const scale = svg.getScreenCTM().a || 1;
-  const r = 12 / scale;
-  const toRoot = svg.getCTM().inverse();
-  const dots = [];
-  for (const id of Object.keys(DATA.points)) {
-    const el = document.getElementById(prefix + "-" + id);
-    if (!el) continue;
-    const bb = el.getBBox();
-    const m = toRoot.multiply(el.getCTM());
-    const pt = new DOMPoint(bb.x + bb.width / 2, bb.y + bb.height / 2).matrixTransform(m);
-    const c = document.createElementNS(NS, "circle");
-    c.setAttribute("cx", pt.x); c.setAttribute("cy", pt.y); c.setAttribute("r", r);
-    c.setAttribute("class", "hit " + id.split("-")[0]);
-    c.setAttribute("tabindex", "0");
-    c.setAttribute("aria-label", DATA.points[id].kernel + " " + DATA.points[id].name);
-    c.addEventListener("focus", () => { const b = c.getBoundingClientRect(); showTip(id, b.right, b.top); });
-    c.addEventListener("blur", hideTip);
-    svg.appendChild(c);
-    dots.push({ id, x: pt.x, y: pt.y, c });
-  }
-  svg.addEventListener("mousemove", e => {
-    const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(svg.getScreenCTM().inverse());
-    const lim = 12 / (svg.getScreenCTM().a || 1);
-    let best = null, bestD = lim * lim;
-    for (const d of dots) {
-      if (d.c.style.display === "none") continue;
-      const dd = (d.x - p.x) ** 2 + (d.y - p.y) ** 2;
-      if (dd <= bestD) { best = d; bestD = dd; }
-    }
-    svg.classList.toggle("near", !!best);
-    if (best) showTip(best.id, e.clientX, e.clientY); else hideTip();
-  });
-  svg.addEventListener("mouseleave", () => { svg.classList.remove("near"); hideTip(); });
-}
-
-function setMode(all) {
-  chart.classList.toggle("all", all);
-  document.getElementById("m-all").setAttribute("aria-pressed", all);
-  document.getElementById("m-best").setAttribute("aria-pressed", !all);
-  try { localStorage.setItem("roofline-mode", all ? "all" : "best"); } catch (e) {}
-}
-document.getElementById("m-all").onclick = () => setMode(true);
-document.getElementById("m-best").onclick = () => setMode(false);
-
-for (const chip of document.querySelectorAll(".chip")) {
-  chip.onclick = () => {
-    const on = chip.getAttribute("aria-pressed") !== "true";
-    chip.setAttribute("aria-pressed", on);
-    const k = chip.dataset.k;
-    for (const el of chart.querySelectorAll(`[id^="b-${k}-"], [id^="a-${k}-"], .hit.${k}`)) {
-      el.style.display = on ? "" : "none";
-    }
-  };
-}
-
-addHits(chart.querySelector(".view.b svg"), "b");
-addHits(chart.querySelector(".view.a svg"), "a");
-let saved = null;
-try { saved = localStorage.getItem("roofline-mode"); } catch (e) {}
-setMode(saved === "all");
-</script>
-</body>
-</html>
-"""
+CSV_COLUMNS = [("name", "name"), ("unit", "unit"), ("flops", "F"), ("bytes", "B"),
+               ("seconds", "seconds"), ("gflops", "P"), ("ai", "AI"), ("parallel", "parallel"),
+               ("cores", "cores"), ("level", "level"), ("peak_gflops", "peak"),
+               ("bandwidth_gbs", "bw"), ("ridge", "ridge"), ("roof_gflops", "roof"),
+               ("pct_of_roof", "pct"), ("bound", "bound"), ("verdict", "verdict")]
 
 
-def write_html(report, rows, out, args):
-    import html
-    import io
+def _cell(key, value):
+    if value is None:
+        return ""
+    if key == "pct":
+        return f"{100 * value:.1f}"                  # percent of the roof
+    if key == "cores":
+        return "all cores" if value == "all" else "1 core"
+    if key == "level":
+        return LEVEL_NAMES.get(value, value)
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return str(value)
 
-    def svg_text(all_points, prefix):
-        fig = class_figure(report, args, all_points=all_points, gid_prefix=prefix)
-        buf = io.StringIO()
-        fig.savefig(buf, format="svg", facecolor=fig.get_facecolor(), metadata={"Date": None})
-        text = buf.getvalue()
-        text = text[text.index("<svg"):]
-        # responsive: keep the viewBox, drop the fixed size
-        return re.sub(r'<svg([^>]*?) width="[^"]+" height="[^"]+"', r'<svg\1', text, count=1)
 
-    # two charts: start and best (b), every baseline (a); the toggle swaps them
-    svg_b = svg_text(False, "b")
-    svg_a = svg_text(True, "a")
+def write_csv(points, path, cpu=None, extra=()):
+    """
+    One row per point, plus a header row.
+    - extra: (column, key) pairs written first, e.g. [("kernel", "kernel")].
+    - pct_of_roof is in percent; other numbers keep 6 significant digits.
+    """
+    cols = list(extra) + CSV_COLUMNS
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow([c for c, _ in cols] + ["cpu"])
+        for p in points:
+            writer.writerow([_cell(k, p.get(k)) for _, k in cols] + [cpu or ""])
+    os.replace(tmp, path)
+    return path
 
-    results = [r for r in report["results"] if r["status"] == "ok"]
-    points, chips = {}, []
-    for ki, r in enumerate(results):
-        entry = KERNELS.get(r["kernel"], {})
-        label, student = entry.get("label", r["kernel"].upper()), entry.get("student", "?")
-        unit = "GOP" if r["unit"] == "OP" else "GFLOP"
-        for p in r["points"]:
-            if not p.get("gid") or (p["python"] and not args.include_python):
-                continue
-            role = "best" if p is r["best"] else "start" if p is r["start"] else ""
-            points[p["gid"].split("-", 1)[1]] = dict(kernel=label, student=student, name=p["name"], role=role, n=r["n"],
-                                    P=p["P"], AI=p["AI"], roof=p["roof"], pct=p["pct"], unit=unit,
-                                    level=LEVEL_NAMES[p["level"]],
-                                    cores="all cores" if p["cores"] == "all" else "1 core",
-                                    verdict=p["verdict"], parallel=p["parallel"], correct=p["correct"])
-        chips.append(f'<button class="chip" data-k="k{ki}" aria-pressed="true"><i style="background:'
-                     f'{kernel_color(r["kernel"], LIGHT)}"></i>{html.escape(label)} · {html.escape(student)}</button>')
 
-    trs = []
-    for row in rows:
-        k = f'<span class="sw" style="background:{kernel_color(row["key"], LIGHT)}"></span>' \
-            f'{html.escape(row["kernel"])} · {html.escape(row["student"])}'
-        if row["status"] != "ok" or not row.get("best_gflops"):
-            trs.append(f'<tr><td>{k}</td><td class="num">{row["n"]}</td><td colspan="10">'
-                       f'{html.escape(str(row.get("best", row["status"])))}</td></tr>')
-            continue
-        u = "GOP/s" if row.get("unit") == "OP" else "GFLOP/s"
-        pill = "mem" if row["bound"] == "Memory-bound" else "comp"
-        trs.append(
-            f'<tr><td>{k}</td><td class="num">{row["n"]}</td><td class="num">{row["start_gflops"]:.2f}</td>'
-            f'<td>{html.escape(row["best"])}</td><td class="num">{row["best_gflops"]:.2f} {u}</td>'
-            f'<td class="num">{row["speedup"]:.1f}×</td><td class="num">{row["ai"]:.2f}</td>'
-            f'<td>{row["roof_used"]}</td><td class="num">{row["roof"]:.1f}</td>'
-            f'<td class="num">{100 * row["pct"]:.0f}%</td>'
-            f'<td><span class="pill {pill}">{html.escape(row["verdict"])}</span></td><td>{row["bytes_src"]}</td></tr>')
-    for s in report["skipped"]:
-        entry = KERNELS.get(s["kernel"], {})
-        trs.append(f'<tr><td>{html.escape(entry.get("label", s["kernel"].upper()))} · '
-                   f'{html.escape(entry.get("student", "?"))}</td><td class="num">{s.get("n", "")}</td>'
-                   f'<td colspan="10">skipped: {html.escape(s["reason"])}</td></tr>')
+def _yes(value):
+    return str(value or "").strip().lower() in ("1", "true", "yes", "y")
 
-    sizes = [f"{KERNELS.get(r['kernel'], {}).get('label', r['kernel']).lower()} {r['n']}" for r in results]
-    notes = footnotes(report, args) + report["notes"] + [
-        "Hover or tab to a dot for its numbers; click a kernel to hide it."]
-    page = (HTML_TEMPLATE
-            .replace("__TITLE__", "ECE 752 SwiftPack · Class Roofline")
-            .replace("__SUB__", html.escape(_subtitle(report, sizes)))
-            .replace("__CHIPS__", "\n  ".join(chips))
-            .replace("__ROWS__", "\n".join(trs))
-            .replace("__NOTES__", "".join(f"<li>{html.escape(n)}</li>" for n in notes))
-            .replace("__DATA__", json.dumps({"points": points}).replace("<", "\\u003c"))
-            .replace("__SVG_B__", svg_b)
-            .replace("__SVG_A__", svg_a))
-    tmp = out / "roofline.html.tmp"
-    tmp.write_text(page, encoding="utf-8")
-    os.replace(tmp, out / "roofline.html")
+
+def read_points(path, roofs, log=print):
+    """
+    Computations from a CSV file with a header row, one per line:
+    - name, flops, bytes, seconds (or name, gflops, ai)
+    - optional: parallel, working_set_mb, read_only (yes/no), unit (FLOP or OP)
+    """
+    pts = []
+    with open(path, encoding="utf-8-sig", newline="") as fh:
+        for line, raw in enumerate(csv.DictReader(fh), 2):
+            row = {(k or "").strip().lower(): (v.strip() if isinstance(v, str) else "")
+                   for k, v in raw.items()}
+
+            def num(key):
+                return float(row[key]) if row.get(key) else None
+            try:
+                ws = num("working_set_mb")
+                pts.append(analyze_point(row.get("name") or f"line {line}", roofs, flops=num("flops"),
+                                         bytes_moved=num("bytes"), seconds=num("seconds"),
+                                         gflops=num("gflops"), ai=num("ai"),
+                                         parallel=_yes(row.get("parallel")),
+                                         working_set=ws * 2**20 if ws else None,
+                                         read_only=_yes(row.get("read_only")),
+                                         unit=row.get("unit") or "FLOP"))
+            except ValueError as exc:
+                log(f"warning: {path}, line {line} skipped: {exc}")
+    return pts
+
+
+# ---------------------------------------------------------
+# Example: two small Numba kernels, timed with measure()
+# ---------------------------------------------------------
+def example_points(roofs, log=print):
+    """A GEMV (memory-bound) and a simple matmul (compute-bound) on this machine."""
+    import numpy as np
+    from numba import njit
+
+    @njit(fastmath=True)
+    def gemv(A, x, y):
+        # y = A x: each element of A is used once, so A streams from memory
+        n, m = A.shape
+        for i in range(n):
+            s = 0.0
+            for j in range(m):
+                s += A[i, j] * x[j]
+            y[i] = s
+
+    @njit(fastmath=True)
+    def matmul_ikj(A, B, C):
+        # C += A B in i-k-j order: every element of A, B and C is used n times
+        n = A.shape[0]
+        for i in range(n):
+            for k in range(n):
+                a = A[i, k]
+                for j in range(n):
+                    C[i, j] += a * B[k, j]
+
+    # GEMV: A as large as the bandwidth test (at least 4x the L3), so it comes from DRAM
+    l3 = (roofs.get("l3_total_mb") or 32.0) * 2**20
+    n = int(math.sqrt(max(128 * 2**20, 4 * l3) / 8))
+    A, x, y = np.random.rand(n, n), np.random.rand(n), np.zeros(n)
+    log(f"  gemv, n={n} (A = {8 * n * n / 2**20:.0f} MiB) ...")
+    # - 2 FLOPs per element of A; bytes: A once (8n^2), plus x and y (O(n))
+    # - A is only read: read-only DRAM roof
+    gemv_pt = measure(gemv, A, x, y, flops=2.0 * n * n, bytes_moved=8.0 * n * n + 16.0 * n,
+                      name=f"gemv y = A x, n={n}", working_set=8.0 * n * n, read_only=True, roofs=roofs)
+    del A
+    # matmul: three 2 MiB matrices fit in L3
+    # - 2 FLOPs per (i, k, j); bytes with perfect reuse: read A, B; read and write C (32 n^2)
+    # - setup() gives a zeroed C before every call (C += A B changes it), untimed
+    m = 512
+    A, B = np.random.rand(m, m), np.random.rand(m, m)
+    log(f"  matmul (i-k-j order), n={m} ...")
+    mm_pt = measure(matmul_ikj, flops=2.0 * m**3, bytes_moved=32.0 * m * m, name=f"matmul ikj, n={m}",
+                    setup=lambda: (A, B, np.zeros((m, m))), working_set=24.0 * m * m, roofs=roofs)
+    return [gemv_pt, mm_pt]
 
 
 # ---------------------------------------------------------
@@ -2117,166 +1337,121 @@ def write_html(report, rows, out, args):
 # ---------------------------------------------------------
 HELP_EXAMPLES = """\
 examples:
-  python demos/roofline.py                                   every benchmarks/*_bench.py
-  python demos/roofline.py benchmarks/matmul_numba_bench.py  one kernel, with its detailed chart
-  python demos/roofline.py --n 256                           same N for every kernel (faster)
-  python demos/roofline.py --n matmul=1024                   N for one kernel only
-  python demos/roofline.py --plot-only --html                redraw saved results, add the web page
-  python demos/roofline.py --plot-only --all                 every baseline on the class chart
+  python demos/roofline.py --name my_kernel --flops 1.68e8 --bytes 4.03e8 --time 0.0135
+  python demos/roofline.py --name my_kernel --gflops 12.4 --ai 0.42 --parallel
+  python demos/roofline.py --points runs.csv      many computations on one chart
+  python demos/roofline.py --example              time two small built-in Numba kernels
+  python demos/roofline.py                        only this machine's roofs
 
-Charts, a summary table and results.json are written to demos/roofline_output/.
-A bench file can define roofline_bytes(name, n) for exact bytes (see the top of this file).
+Writes roofline.png and roofline.csv to roofline_output/ next to this script
+(change with --out). How every number is calculated: README.md in this folder.
 """
 
 
 def parse_args(argv):
     p = argparse.ArgumentParser(
         prog="python demos/roofline.py",
-        description="Run every benchmarks/*_bench.py, measure this machine's roofs, "
-                    "and draw the class roofline.",
+        description="Place a computation on this machine's roofline: measure the roofs, "
+                    "mark it memory-bound or compute-bound, and write one chart (PNG) "
+                    "and one table (CSV).",
         epilog=HELP_EXAMPLES, formatter_class=argparse.RawDescriptionHelpFormatter)
 
-    run = p.add_argument_group("what to run")
-    run.add_argument("paths", nargs="*", metavar="FILE_OR_FOLDER",
-                     help="bench files or folders (default: benchmarks/)")
-    run.add_argument("--n", action="append", metavar="N | KERNEL=N",
-                     help="problem size for every kernel, or for one kernel (repeatable)")
-    run.add_argument("--plot-only", action="store_true", help="run nothing; redraw from saved results")
-    run.add_argument("--out", default=str(DEFAULT_OUT), metavar="DIR",
-                     help="output folder (default: demos/roofline_output/)")
-    # - every kernel finishes in under 160 s on a 12-core desktop, so 600 s is ample headroom
-    # - 2100 s leaves 10 of SLURM's 45 minutes for run_bench.sh's venv setup and matmul run
-    run.add_argument("--timeout", type=float, default=600, metavar="SEC",
-                     help="stop a bench file after this many seconds (default: 600)")
-    run.add_argument("--budget", type=float, default=2100, metavar="SEC",
-                     help="no new bench file starts after this many seconds (default: 2100)")
+    comp = p.add_argument_group("the computation")
+    comp.add_argument("--name", default="computation", help="its label on the chart")
+    comp.add_argument("--flops", type=float, help="floating-point operations it does")
+    comp.add_argument("--bytes", type=float, help="bytes it moves between memory and the core")
+    comp.add_argument("--time", type=float, metavar="SEC", help="its run time in seconds")
+    comp.add_argument("--gflops", type=float, help="its GFLOP/s (instead of --flops and --time)")
+    comp.add_argument("--ai", type=float, metavar="FLOP/BYTE",
+                      help="its arithmetic intensity (instead of --flops and --bytes)")
+    comp.add_argument("--parallel", action="store_true", help="it ran on all cores (all-core roof)")
+    comp.add_argument("--working-set-mb", type=float, metavar="MB",
+                      help="data it works on; if that fits in L3, the L3 roof is used")
+    comp.add_argument("--read-only", action="store_true",
+                      help="it only reads its big array (read-only DRAM roof)")
+    comp.add_argument("--unit", choices=["FLOP", "OP"], default="FLOP",
+                      help="OP for integer/compare work (default: FLOP)")
+    comp.add_argument("--points", metavar="CSV",
+                      help="many computations: name,flops,bytes,seconds (or name,gflops,ai), "
+                           "optional parallel,working_set_mb,read_only,unit")
+    comp.add_argument("--example", action="store_true", help="time two small built-in Numba kernels")
 
-    chart = p.add_argument_group("chart options")
-    chart.add_argument("--all", action="store_true", help="show every baseline, not just start and best")
-    chart.add_argument("--per-kernel", action="store_true", default=None,
-                       help="one detailed chart per kernel (on by default for a single file)")
-    chart.add_argument("--include-python", action="store_true", help="also show the pure-Python baselines")
-    chart.add_argument("--html", action="store_true", help="also write the interactive roofline.html")
-    chart.add_argument("--show", action="store_true", help="open the class chart in a window at the end")
+    out = p.add_argument_group("output")
+    out.add_argument("--out", default=str(DEFAULT_OUT), metavar="DIR",
+                     help="output folder (default: roofline_output/ next to this script)")
+    out.add_argument("--title", help="chart title")
 
-    machine = p.add_argument_group("machine numbers (measured automatically; override if needed)")
-    machine.add_argument("--remeasure", action="store_true", help="measure the roofs again")
-    machine.add_argument("--peak-gflops", metavar="GFLOPS[,ALL]",
-                         help="peak GFLOP/s: 1 core, or 1 core,all cores")
-    machine.add_argument("--bandwidth", metavar="GBS[,ALL]", help="DRAM GB/s, read + write")
-    machine.add_argument("--read-bandwidth", metavar="GBS[,ALL]", help="DRAM GB/s, read only")
-    machine.add_argument("--l3-bandwidth", metavar="GBS[,ALL]", help="L3 GB/s")
-    machine.add_argument("--l3-mb", type=float, metavar="MB",
-                         help="L3 size of one instance (e.g. 32 per CCD on a Ryzen 5900X)")
-    machine.add_argument("--peak-source", choices=["measured", "theoretical"], default="measured",
-                         help="which peak to use as the roof (default: measured)")
-    machine.add_argument("--ai", action="append", metavar="KERNEL=AI",
-                         help="force the arithmetic intensity of one kernel")
-
-    p.add_argument("--_worker", help=argparse.SUPPRESS)
-    p.add_argument("--json", help=argparse.SUPPRESS)
+    add_machine_args(p)
     return p.parse_args(argv)
+
+
+def print_roofs(roofs, machine):
+    m = machine or {}
+    print(f"\nRoofs ({m.get('cpu', 'this machine')}):")
+    print(f"  {'':<26}{'1 core':>9}{'all cores':>12}")
+    for label, f in (("peak GFLOP/s", "peak"), ("DRAM GB/s, read + write", "dram"),
+                     ("DRAM GB/s, read only", "dram_read"), ("L3 GB/s", "l3")):
+        one, allc = roofs["1"].get(f), roofs["all"].get(f)
+        if one or allc:
+            print(f"  {label:<26}{fmt(one):>9}{fmt(allc):>12}   ({roofs['1'].get(f + '_src')})")
+    ridge = [r["peak"] / r["dram"] if r.get("peak") and r.get("dram") else None
+             for r in (roofs["1"], roofs["all"])]
+    print(f"  {'ridge FLOP/byte (DRAM)':<26}{fmt(ridge[0]):>9}{fmt(ridge[1]):>12}")
+
+
+def print_points(points):
+    if not points:
+        return
+    head = (f"{'Computation':<30} {'GFLOP/s':>8} {'AI':>7} {'Roof':>8} {'% roof':>7}  "
+            f"{'Roof used':<24} Verdict")
+    print("\n" + head + "\n" + "-" * len(head))
+    for p in points:
+        used = f"{LEVEL_NAMES[p['level']]}, {'all cores' if p['cores'] == 'all' else '1 core'}"
+        print(f"{p['name'][:30]:<30} {p['P']:>8.3g} {p['AI']:>7.3g} {p['roof']:>8.3g} "
+              f"{100 * p['pct']:>6.0f}%  {used:<24} {p['verdict']}")
 
 
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    if args._worker:
-        return worker_main(args)
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, ValueError):
         pass
 
-    out = Path(args.out).resolve()
-    out.mkdir(parents=True, exist_ok=True)
-    # the output folder ignores itself, so the repo's .gitignore needs no change
-    if not (out / ".gitignore").exists():
-        (out / ".gitignore").write_text("# written by demos/roofline.py\n*\n", encoding="utf-8")
-    data = load_results(out)
+    out = ensure_out(Path(args.out).resolve())
+    machine = load_machine(out, remeasure=args.remeasure, l3_mb=args.l3_mb)
+    roofs = build_roofs(machine, **roof_overrides(args))
+    if not (roofs["1"]["peak"] and roofs["1"]["dram"]):
+        print("No roofs: the machine could not be measured. Pass --peak-gflops and --bandwidth.")
+        return 1
+    print_roofs(roofs, machine)
 
-    explicit = [Path(p) for p in args.paths]
-    single_file = len(explicit) == 1 and explicit[0].is_file()
-    per_kernel = single_file if args.per_kernel is None else args.per_kernel
-
-    if args.plot_only:
-        kernels = {kernel_key(p) for p in explicit if p.is_file()} or None
-        machine = load_machine(out, args, need_measure=False)
-        if not data["runs"]:
-            print(f"No saved results in {out / 'results.json'}. Run without --plot-only first.")
-            return 1
-        detail = {r["kernel"] for r in select_runs(data, args.n, kernels)} if per_kernel else ()
-        report, rows = render_all(data, machine, args, out, detail, kernels)
-        print_summary(rows, report)
-        _print_outputs(out, args)
-        _maybe_show(args)
-        return 0 if any(r["status"] == "ok" for r in report["results"]) else 1
-
-    files = find_bench_files(explicit or [REPO / "benchmarks"])
-    if not files:
-        print("No *_bench.py files found.\n")
-        parse_args(["--help"])
+    try:
+        if args.example:
+            print("\nTiming the example kernels:")
+            points, title = example_points(roofs), "Roofline · two example kernels"
+        elif args.points:
+            points, title = read_points(args.points, roofs), f"Roofline · {Path(args.points).name}"
+        elif any(v is not None for v in (args.flops, args.bytes, args.time, args.gflops, args.ai)):
+            ws = args.working_set_mb * 2**20 if args.working_set_mb else None
+            points = [analyze_point(args.name, roofs, flops=args.flops, bytes_moved=args.bytes,
+                                    seconds=args.time, gflops=args.gflops, ai=args.ai,
+                                    parallel=args.parallel, working_set=ws,
+                                    read_only=args.read_only, unit=args.unit)]
+            title = f"Roofline · {args.name}"
+        else:
+            points, title = [], "Roofline · this machine"
+    except (ValueError, OSError) as exc:
+        print(f"error: {exc}")
         return 2
 
-    t_start = time.time()
-    machine = load_machine(out, args, need_measure=True)
-    kernels = {kernel_key(f) for f in files} if explicit else None
-    detail = set()
-    warned_workqueue = False
-    print(f"\nRunning {len(files)} bench file(s); budget {args.budget:.0f} s, timeout {args.timeout:.0f} s each.")
-    for i, path in enumerate(files, 1):
-        key = kernel_key(path)
-        n = choose_n(key, args.n)
-        left = args.budget - (time.time() - t_start)
-        label = f"[{i}/{len(files)}] {key} N={n}"
-        if left < 10:
-            print(f"{label}: skipped, budget exhausted")
-            merge_skip(data, dict(kernel=key, n=n, file=str(path), reason="budget exhausted", when=_now()))
-            continue
-        print(f"{label}: running {path.name} ...", flush=True)
-        t0 = time.time()
-        run, err = run_worker(path, key, n, min(args.timeout, left), out)
-        if err:
-            print(f"{label}: skipped: {err}")
-            merge_skip(data, dict(kernel=key, n=n, file=str(path), reason=err, when=_now()))
-        else:
-            run["machine_key"] = machine.get("key")
-            run["machine"] = {k: v for k, v in machine.items() if k != "measured"}
-            run["roofs_measured"] = machine.get("measured")
-            merge_run(data, run)
-            print(f"{label}: done in {time.time() - t0:.0f} s, {len(run['rows'])} baselines")
-            if run.get("threading_layer") == "workqueue" and not warned_workqueue:
-                print("    warning: " + WORKQUEUE_NOTE)
-                warned_workqueue = True
-            for w in run["warnings"]:
-                print(f"    warning: {w}")
-            if per_kernel:
-                detail.add(key)
-        # Save and render after every kernel, so a killed job keeps what finished
-        _write_json(out / "results.json", data)
-        report, rows = render_all(data, machine, args, out, detail if per_kernel else (), kernels)
-
-    print_summary(rows, report)
-    _print_outputs(out, args)
-    _maybe_show(args)
-    return 0 if any(r["status"] == "ok" for r in report["results"]) else 1
-
-
-def _print_outputs(out, args):
-    print(f"\nOutputs in {out}:")
-    for f in sorted(out.glob("roofline*")):
-        print(f"  {f.name}")
-
-
-def _maybe_show(args):
-    # charts are drawn without pyplot, so --show opens the saved class chart in a window
-    png = Path(args.out).resolve() / "roofline_class.png"
-    if args.show and png.exists():
-        import matplotlib.pyplot as plt
-        img = plt.imread(str(png))
-        fig = plt.figure(figsize=(13, 7.5))
-        fig.add_axes([0, 0, 1, 1]).imshow(img)
-        fig.axes[0].axis("off")
-        plt.show()
+    png = plot_roofline(points, roofs, out / "roofline.png", title=args.title or title,
+                        subtitle=machine_line(machine))
+    print_points(points)
+    print(f"\nOutputs in {out}:\n  {png.name}")
+    if points:
+        print(f"  {write_csv(points, out / 'roofline.csv', cpu=machine.get('cpu')).name}")
+    return 0
 
 
 if __name__ == "__main__":
