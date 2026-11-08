@@ -13,3 +13,11 @@
 ## Benchmark:
   - [Matrix multiplication](benchmarks/matmul.md)
   - [Cholesky decomposition](benchmarks/cholesky.md)
+
+## Contributors
+- [Kazem Cheshmi](@cheshmi)
+
+## License
+This project is licensed under apache 2.0 license. 
+Copyright (c) 2024 [Swiftware Lab](https://swiftware-lab.github.io/switpack). 
+All rights reserved.

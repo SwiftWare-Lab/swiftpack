@@ -1,6 +1,18 @@
 site_name: SwiftPack Docs
 site_url: https://swiftware-lab.github.io/switpack/
+repo_url: https://github.com/SwiftWare-Lab/swiftpack
+repo_name: swiftware-lab/swiftpack
 docs_dir: doc
+
+theme:
+  name: material
+  palette:
+    # Scheme controls light vs dark mode ("default" = light mode)
+    scheme: default
+    # Primary controls the header and main UI color
+    primary: indigo
+    # Accent controls links, buttons, and highlights
+    accent: blue
 
 nav:
   - Home: index.md
@@ -15,3 +27,6 @@ nav:
   - Benchmark:
       - Matrix multiplication: benchmarks/matmul.md
       - Cholesky decomposition: benchmarks/cholesky.md
+
+
+copyright: Copyright &copy; 2026 <a href="https://github.com/swiftware-lab" target="_blank" rel="noopener">SwiftWare Lab</a>. All rights reserved.
