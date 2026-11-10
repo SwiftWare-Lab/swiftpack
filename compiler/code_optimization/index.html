@@ -8,13 +8,9 @@
       
       
       
-        <link rel="canonical" href="https://swiftware-lab.github.io/switpack/compiler/basics/">
+        <link rel="canonical" href="https://swiftware-lab.github.io/switpack/compiler/code_optimization/">
       
       
-        <link rel="prev" href="../overview/">
-      
-      
-        <link rel="next" href="../local_analysis/">
       
       
         
@@ -25,7 +21,7 @@
     
     
       
-        <title>Code Representation - SwiftPack Docs</title>
+        <title>Code Optimization Techniques - SwiftPack Docs</title>
       
     
     
@@ -74,7 +70,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#code-representation-and-optimization-with-numba" class="md-skip">
+        <a href="#code-optimization-techniques" class="md-skip">
           Skip to content
         </a>
       
@@ -110,7 +106,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Code Representation
+              Code Optimization Techniques
             
           </span>
         </div>
@@ -164,13 +160,13 @@
     
     
       <div class="md-header__source">
-        <a href="https://github.com/swiftware-lab/switpack" title="Go to repository" class="md-source" data-md-component="source">
+        <a href="https://github.com/SwiftWare-Lab/swiftpack" title="Go to repository" class="md-source" data-md-component="source">
   <div class="md-source__icon md-icon">
     
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
   </div>
   <div class="md-source__repository">
-    swiftware-lab/switpack
+    swiftware-lab/swiftpack
   </div>
 </a>
       </div>
@@ -210,13 +206,13 @@
   </label>
   
     <div class="md-nav__source">
-      <a href="https://github.com/swiftware-lab/switpack" title="Go to repository" class="md-source" data-md-component="source">
+      <a href="https://github.com/SwiftWare-Lab/swiftpack" title="Go to repository" class="md-source" data-md-component="source">
   <div class="md-source__icon md-icon">
     
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
   </div>
   <div class="md-source__repository">
-    swiftware-lab/switpack
+    swiftware-lab/swiftpack
   </div>
 </a>
     </div>
@@ -336,20 +332,18 @@
       
   
   
-    
   
   
-  
     
     
     
     
     
-    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--nested">
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
         
           
           <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
@@ -370,7 +364,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
           <label class="md-nav__title" for="__nav_3">
             <span class="md-nav__icon md-icon"></span>
             
@@ -413,37 +407,10 @@
                 
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Code Representation
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../basics.md" class="md-nav__link">
         
   
   
@@ -459,148 +426,6 @@
   
 
       </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#code-representation" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Code Representation
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Code Representation">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#abstract-syntax-tree-ast" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Abstract Syntax Tree (AST)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#list-of-instructions" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        List of Instructions
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#control-flow-graph-cfg" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Control Flow Graph (CFG)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#basic-blocks" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Basic Blocks
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#code-optimization-techniques" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Code Optimization Techniques
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Code Optimization Techniques">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#1-loop-optimization" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        1. Loop Optimization
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#2-data-structure-optimization" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        2. Data Structure Optimization
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#3-function-optimization" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        3. Function Optimization
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#4-logic-expression-optimization" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        4. Logic &amp; Expression Optimization
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -834,79 +659,6 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#code-representation" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Code Representation
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Code Representation">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#abstract-syntax-tree-ast" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Abstract Syntax Tree (AST)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#list-of-instructions" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        List of Instructions
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#control-flow-graph-cfg" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Control Flow Graph (CFG)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#basic-blocks" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Basic Blocks
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#code-optimization-techniques" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Code Optimization Techniques
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Code Optimization Techniques">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
   <a href="#1-loop-optimization" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -916,8 +668,8 @@
   </a>
   
 </li>
-        
-          <li class="md-nav__item">
+      
+        <li class="md-nav__item">
   <a href="#2-data-structure-optimization" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -927,8 +679,8 @@
   </a>
   
 </li>
-        
-          <li class="md-nav__item">
+      
+        <li class="md-nav__item">
   <a href="#3-function-optimization" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -938,8 +690,8 @@
   </a>
   
 </li>
-        
-          <li class="md-nav__item">
+      
+        <li class="md-nav__item">
   <a href="#4-logic-expression-optimization" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -947,11 +699,6 @@
       
     </span>
   </a>
-  
-</li>
-        
-      </ul>
-    </nav>
   
 </li>
       
@@ -975,50 +722,11 @@
   
 
 
-<h1 id="code-representation-and-optimization-with-numba">Code Representation and Optimization with Numba</h1>
-<h2 id="code-representation">Code Representation</h2>
-<p>Code representation bridges human-readable source code and executable 
-target instructions. Compilers parse and lower source code through multiple 
-levels of Intermediate Representation (IR) to analyze semantics and 
-apply performance optimizations.</p>
-<hr />
-<h3 id="abstract-syntax-tree-ast">Abstract Syntax Tree (AST)</h3>
-<p>An <strong>Abstract Syntax Tree (AST)</strong> is a hierarchical, tree-structured 
-representation of source code produced during syntactic analysis. 
-It strips away purely syntactic tokens (such as semicolons, explicit 
-parentheses, and whitespace) while retaining structural semantics, 
-operator precedence, and parent-child execution scopes.</p>
-<ul>
-<li><strong>Nodes:</strong> Represent structural constructs such as operators 
- (<code>+</code>, <code>*</code>), statements (<code>if</code>, <code>while</code>), or expressions (<code>BinaryOp</code>).</li>
-<li><strong>Leaves:</strong> Represent terminal operands, such as variable 
-  names (<code>Name</code>) or literals (<code>Constant</code>).</li>
-<li><strong>Usage:</strong> Used by parsers, linters, semantic analyzers, static 
-security checkers, and source-to-source compilers.</li>
-</ul>
-<hr />
-<h3 id="list-of-instructions">List of Instructions</h3>
-<p>Lowering an AST into a linear <strong>List of Instructions</strong> flattens the 
-tree structure into sequential abstract machine instructions. This flat 
-Intermediate Representation (IR) often uses <strong>Three-Address Code (3AC)</strong> 
-or register-based bytecode instructions where each operation has at most three operands.</p>
-<ul>
-<li><strong>Characteristics:</strong> Simple instruction semantics (e.g., <code>LOAD</code>, <code>ADD</code>, <code>STORE</code>, <code>JUMP_IF_FALSE</code>).</li>
-<li><strong>Usage:</strong> Simplifies register allocation, instruction selection, and target machine code emission. In <strong>Numba</strong>, Python AST is lowered into Numba IR instructions (such as <code>jump</code>, <code>branch</code>, <code>call</code>, and assignment operations) before being passed to LLVM.</li>
-</ul>
-<hr />
-<h3 id="control-flow-graph-cfg">Control Flow Graph (CFG)</h3>
-<p>A <strong>Control Flow Graph (CFG)</strong> is a directed graph $(V, E)$ that explicitly models all possible execution paths through a program unit (such as a function or subroutine).</p>
-<ul>
-<li><strong>Nodes ($V$):</strong> Basic Blocks containing sequential instructions.</li>
-<li><strong>Edges ($E$):</strong> Control transfers via conditional branches, unconditional jumps, or function calls.</li>
-<li></li>
-</ul>
-<h3 id="basic-blocks">Basic Blocks</h3>
-<p>Basic blocks are sequences of instructions with no branches except at the end. They are the building blocks of control flow graphs.</p>
-<p>CFG is applied to basic blocks.</p>
-<h2 id="code-optimization-techniques">Code Optimization Techniques</h2>
-<p>Depending on the scope of optimization, code optimization is either <strong>Local Optimization</strong> (operating within a single basic block) or <strong>Global Optimization</strong> (operating across basic blocks within a CFG or across function boundaries via Interprocedural Analysis).</p>
+<h1 id="code-optimization-techniques">Code Optimization Techniques</h1>
+<p>Depending on the scope of optimization, code optimization is either 
+<strong>Local Optimization</strong> (operating within a single basic block) or 
+<strong>Global Optimization</strong> (operating across basic blocks within a CFG or 
+across function boundaries via Interprocedural Analysis).</p>
 <pre><code>                ┌────────────────────────────────────────┐
                 │      Code Optimization Scope           │
                 └───────────────────┬────────────────────┘
@@ -1031,9 +739,15 @@ or register-based bytecode instructions where each operation has at most three o
    │ (Single Basic Block│                              │ (Across CFG /      │
    │      Scope)        │                              │ Interprocedural)   │
    └────────────────────┘                              └────────────────────┘</p>
-<p>Below is the classification of optimization techniques across four fundamental domains:</p>
-<hr />
-<h3 id="1-loop-optimization">1. Loop Optimization</h3>
+<p>Code optimization techniques are classified into four fundamental domains: 
+<strong>Loop Optimization</strong>, <strong>Data Structure Optimization</strong>, 
+<strong>Function Optimization</strong>, and <strong>Logic &amp; Expression Optimization</strong>. 
+Each domain targets specific aspects of code execution to enhance 
+performance, reduce memory usage, and improve overall efficiency.
+These techniques can be applied locally or globally, depending on the 
+scope of optimization and the specific requirements of the program.
+Below is the classification of optimization techniques across four fundamental domains:</p>
+<h2 id="1-loop-optimization">1. Loop Optimization</h2>
 <p>Loops represent the highest execution-density areas in programs. Optimizing loop bounds, array index access, and iteration order yields significant performance gains.</p>
 <ul>
 <li><strong>Loop Invariant Code Motion (Hoisting):</strong> Moves computations whose values do not change across iterations outside the loop header.</li>
@@ -1042,7 +756,7 @@ or register-based bytecode instructions where each operation has at most three o
 <li><strong>Loop Exchange (Permutation):</strong> Reorders nested loops to improve data locality and vectorization opportunities.</li>
 </ul>
 <hr />
-<h3 id="2-data-structure-optimization">2. Data Structure Optimization</h3>
+<h2 id="2-data-structure-optimization">2. Data Structure Optimization</h2>
 <p>Optimizes memory access patterns, layout, and allocation overheads.</p>
 <ul>
 <li><strong>Structure-of-Arrays (SoA) vs. Array-of-Structures (AoS):</strong> Reorganizes struct memory layouts to optimize spatial cache locality and improve vectorization.</li>
@@ -1050,7 +764,7 @@ or register-based bytecode instructions where each operation has at most three o
 <li><strong>Sparsity Exploitation:</strong> Detects and optimizes operations on sparse data structures (e.g., sparse matrices) to avoid unnecessary computations and memory accesses.</li>
 </ul>
 <hr />
-<h3 id="3-function-optimization">3. Function Optimization</h3>
+<h2 id="3-function-optimization">3. Function Optimization</h2>
 <p>Reduces call-stack overhead and optimizes calling conventions.</p>
 <ul>
 <li><strong>Function Inlining:</strong> Replaces a function call site with the body of the target function, eliminating call/return stack frames and enabling downstream compiler optimizations.</li>
@@ -1058,7 +772,7 @@ or register-based bytecode instructions where each operation has at most three o
 <li><strong>Tail Call Optimization (TCO):</strong> Replaces recursive function call stack frames with jumps when the call is in the tail position, converting recursion to $O(1)$ stack space.</li>
 </ul>
 <hr />
-<h3 id="4-logic-expression-optimization">4. Logic &amp; Expression Optimization</h3>
+<h2 id="4-logic-expression-optimization">4. Logic &amp; Expression Optimization</h2>
 <p>Simplifies arithmetic and logical execution paths.</p>
 <ul>
 <li><strong>Constant Folding &amp; Propagation:</strong> Pre-calculates constant operations at compile time (e.g., <code>3 * 8</code> $\rightarrow$ <code>24</code>) and propagates known constant values through expressions.</li>
