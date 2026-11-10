@@ -14,4 +14,6 @@ source $(pwd)/.venv/bin/activate
 pip install -r $(pwd)/requirements.txt
 # mkdir -p $(pwd)/plots
 
+export NUMBA_NUM_THREADS=20
+
 python3 $(pwd)/benchmarks/matmul_numba_bench.py 512 $(pwd)/doc/matmul_numba_bench_512.png

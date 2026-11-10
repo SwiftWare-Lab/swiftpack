@@ -11,6 +11,9 @@ __pycache__/
 *.dot
 *.png
 
+# Ignore everything inside the doc directory by default
+doc/*
+
 # Distribution / packaging
 .Python
 build/

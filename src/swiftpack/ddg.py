@@ -91,7 +91,6 @@ def extract_linear_offset(node, loop_var: str):
                 return val - right_offset
     return None
 
-import ast
 
 def loop_in_slice(node, loop_var):
     """Helper to check if a loop variable exists anywhere inside an AST node/subscript."""

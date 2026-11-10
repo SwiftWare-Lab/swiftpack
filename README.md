@@ -1,7 +1,7 @@
-# Swift-Pack
+# Swiftpack
 
-Swift-Pack explores compact tensor and matrix transformations in Python, with a focus 
-on Numba-based scheduling, tiling, and parallel execution.
+Swiftpack explores compact tensor and matrix transformations in 
+Python, the project is in its early stages of development.
 
 ## Requirements
 
@@ -25,45 +25,6 @@ python -m pip install -r requirements.txt
 ```
 
 That file adds `scipy` and `matplotlib` on top of the core package dependencies from `pyproject.toml`.
-
-## Running the benchmark
-
-The main benchmark compares several matrix-multiplication implementations, including pure Python, Numba, blocked versions, and `numpy.dot`.
-
-Run it from the project root:
-
-```bash
-python benchmarks/matmul_numba_bench.py
-```
-
-You can optionally pass the matrix size as the first argument. If omitted, the script defaults to `512`:
-
-```bash
-python benchmarks/matmul_numba_bench.py 256
-```
-
-The benchmark prints a performance table and opens a plot window at the end. If you are on a headless machine, you may need to configure a non-interactive Matplotlib backend before running it.
-
-## Running the example demo
-
-The demo shows how to use the `swiftpack` decorator with a scheduler strategy from `swiftpack.scheduler`:
-
-```bash
-python demos/matmul_demo.py
-```
-
-The script:
-
-1. creates random matrices,
-2. decorates a naive matrix multiplication function with `@swiftpack(...)`,
-3. compiles and runs the transformed function, and
-4. verifies the result with `numpy.dot`.
-
-If the demo succeeds, it prints:
-
-```text
-Result verified successfully against NumPy!
-```
 
 ## Quick usage example
 
@@ -91,12 +52,4 @@ C = np.zeros((N, N), dtype=np.float64)
 matmul(A, B, C)
 ```
 
-
-## Task list
-
-- [ ] The current GEMM is ~2 times slower than `np.dot`
-  - [ ] micro-kernel in Numba
-  - [ ] L2/L3 caching and tuning
-- [ ] Add other benchmarks
-  - [ ] stencil
-  - [ ] others
+For details, see [documentation](https://swiftware-lab.github.io/swiftpack/).

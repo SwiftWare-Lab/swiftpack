@@ -6,7 +6,7 @@ is assumed to hold in another one, which keeps the analysis cheap and safe.
 
 ## Enabling it: the `lvn` directive
 
-`LocalValueNumbering` (`src/swiftpack/lvn.py`) is an ordinary `Transformation`.
+`LocalValueNumbering` (`../../src/swiftpack/lvn.py`) is an ordinary `Transformation`.
 It is scheduled with the `lvn` directive in `scheduler.py`:
 
 ```python
