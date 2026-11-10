@@ -5,10 +5,14 @@ import matplotlib.pyplot as plt
 from numba import njit, prange
 import numpy as np
 
-# Set single-threaded execution for external BLAS libraries to ensure reproducible benchmarks
+
+# Set single-threaded execution for external BLAS/parallel libraries
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"  # For Apple Accelerate framework
+os.environ["NUMEXPR_NUM_THREADS"] = "1"     # For NumExpr
+os.environ["BLIS_NUM_THREADS"] = "1"        # For BLIS
 
 # Default Matrix Dimensions & Block Sizes
 N = 512
